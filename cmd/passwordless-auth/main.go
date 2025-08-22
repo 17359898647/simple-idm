@@ -11,24 +11,16 @@ import (
 	"github.com/go-chi/jwtauth/v5"
 	"github.com/go-chi/render"
 	"github.com/ilyakaznacheev/cleanenv"
+	"github.com/sosodev/duration"
 	"github.com/tendant/chi-demo/app"
 	dbutils "github.com/tendant/db-utils/db"
 	"github.com/tendant/simple-idm/pkg/client"
+	"github.com/tendant/simple-idm/pkg/device"
+	deviceapi "github.com/tendant/simple-idm/pkg/device/api"
 	"github.com/tendant/simple-idm/pkg/externalprovider"
 	externalProviderAPI "github.com/tendant/simple-idm/pkg/externalprovider/api"
 	"github.com/tendant/simple-idm/pkg/iam"
-	iamapi "github.com/tendant/simple-idm/pkg/iam/api"
 	"github.com/tendant/simple-idm/pkg/iam/iamdb"
-	"github.com/tendant/simple-idm/pkg/oauth2client"
-	"github.com/tendant/simple-idm/pkg/oidc"
-	oidcapi "github.com/tendant/simple-idm/pkg/oidc/api"
-	"github.com/tendant/simple-idm/pkg/signup"
-
-	// "github.com/tendant/simple-idm/pkg/impersonate/impersonatedb"
-
-	"github.com/sosodev/duration"
-	"github.com/tendant/simple-idm/pkg/device"
-	deviceapi "github.com/tendant/simple-idm/pkg/device/api"
 	"github.com/tendant/simple-idm/pkg/login"
 	loginapi "github.com/tendant/simple-idm/pkg/login/api"
 	"github.com/tendant/simple-idm/pkg/login/logindb"
@@ -38,15 +30,11 @@ import (
 	"github.com/tendant/simple-idm/pkg/mapper/mapperdb"
 	"github.com/tendant/simple-idm/pkg/notice"
 	"github.com/tendant/simple-idm/pkg/notification"
-	"github.com/tendant/simple-idm/pkg/profile"
-	profileapi "github.com/tendant/simple-idm/pkg/profile/api"
-	"github.com/tendant/simple-idm/pkg/profile/profiledb"
 	"github.com/tendant/simple-idm/pkg/role"
-	roleapi "github.com/tendant/simple-idm/pkg/role/api"
 	"github.com/tendant/simple-idm/pkg/role/roledb"
+	"github.com/tendant/simple-idm/pkg/signup"
 	"github.com/tendant/simple-idm/pkg/tokengenerator"
 	"github.com/tendant/simple-idm/pkg/twofa"
-	twofaapi "github.com/tendant/simple-idm/pkg/twofa/api"
 	"github.com/tendant/simple-idm/pkg/twofa/twofadb"
 )
 
@@ -117,7 +105,6 @@ type LoginConfig struct {
 	RegistrationEnabled      bool   `env:"LOGIN_REGISTRATION_ENABLED" env-default:"false"`
 	RegistrationDefaultRole  string `env:"LOGIN_REGISTRATION_DEFAULT_ROLE" env-default:"readonlyuser"`
 	MagicLinkTokenExpiration string `env:"MAGIC_LINK_TOKEN_EXPIRATION" env-default:"PT6H"`
-	PhoneVerificationSecret  string `env:"PHONE_VERIFICATION_SECRET" env-default:"secret"`
 }
 
 type ExternalProviderConfig struct {
@@ -158,7 +145,6 @@ type Config struct {
 }
 
 func main() {
-
 	// Create a logger with source enabled
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		AddSource: true, // Enables line number & file path
@@ -218,9 +204,7 @@ func main() {
 	passwordPolicy := createPasswordPolicy(&config.PasswordComplexityConfig)
 
 	// Create a password manager with the policy checker
-	passwordManager := login.NewPasswordManager(
-		loginQueries,
-	)
+	passwordManager := login.NewPasswordManager(loginQueries)
 
 	// Create a policy checker
 	policyChecker := login.NewDefaultPasswordPolicyChecker(passwordPolicy, nil)
@@ -228,7 +212,6 @@ func main() {
 
 	// Create login service with the custom password manager
 	loginRepository := login.NewPostgresLoginRepository(loginQueries)
-	// Use the same repository instance for both LoginRepository and UserRepository interfaces
 
 	lockoutDuration, err := duration.Parse(config.LoginConfig.LockoutDuration)
 	if err != nil {
@@ -248,7 +231,7 @@ func main() {
 		login.WithPasswordManager(passwordManager),
 		login.WithMaxFailedAttempts(config.LoginConfig.MaxFailedAttempts),
 		login.WithLockoutDuration(lockoutDuration.ToTimeDuration()),
-		login.WithMagicLinkTokenExpiration(magicLinkExpiration.ToTimeDuration()), // 10 minutes for magic link token
+		login.WithMagicLinkTokenExpiration(magicLinkExpiration.ToTimeDuration()),
 	)
 	slog.Info("Login service created", "maxFailedAttempts", config.LoginConfig.MaxFailedAttempts, "lockoutDuration", lockoutDuration.ToTimeDuration())
 
@@ -265,18 +248,7 @@ func main() {
 		"simple-idm", // Audience
 	)
 
-	// Create token service with options
-	tokenService := tokengenerator.NewDefaultTokenServiceWithOptions(
-		tokenGenerator, 
-		tokenGenerator, 
-		tempTokenGenerator, 
-		tokenGenerator, 
-		config.JwtConfig.Secret,
-		tokengenerator.WithAccessTokenExpiry(config.JwtConfig.AccessTokenExpiry),
-		tokengenerator.WithRefreshTokenExpiry(config.JwtConfig.RefreshTokenExpiry),
-		tokengenerator.WithTempTokenExpiry(config.JwtConfig.TempTokenExpiry),
-		tokengenerator.WithLogoutTokenExpiry(config.JwtConfig.LogoutTokenExpiry),
-	)
+	tokenService := tokengenerator.NewDefaultTokenService(tokenGenerator, tokenGenerator, tempTokenGenerator, tokenGenerator, config.JwtConfig.Secret)
 	tokenCookieService := tokengenerator.NewDefaultTokenCookieService(
 		"/",
 		config.JwtConfig.CookieHttpOnly,
@@ -284,19 +256,20 @@ func main() {
 		http.SameSiteLaxMode,
 	)
 
-	// Initialize device recognition service and routes
-	// Configure device expiration using the value from config
+	twoFaService := twofa.NewTwoFaService(
+		twofaQueries,
+		twofa.WithNotificationManager(notificationManager),
+		twofa.WithUserMapper(userMapper),
+	)
+
+	// Initialize device service
 	deviceExpirationDays := config.LoginConfig.DeviceExpirationDays
-	// Declare the device expiry duration variable
 	var deviceExpiryDuration time.Duration
-	// Parse ISO 8601 duration using the duration package
 	isoDuration, err := duration.Parse(deviceExpirationDays)
 	if err != nil {
 		slog.Error("Failed to parse device expiration duration", "error", err)
-		// Default to 90 days if parsing fails
 		deviceExpiryDuration = device.DefaultDeviceExpiryDuration
 	} else {
-		// Convert ISO duration to time.Duration
 		deviceExpiryDuration = isoDuration.ToTimeDuration()
 		slog.Info("Device expiration duration set", "duration", deviceExpiryDuration)
 	}
@@ -307,11 +280,6 @@ func main() {
 	deviceRepository := device.NewPostgresDeviceRepositoryWithOptions(pool, deviceRepositoryOptions)
 	deviceService := device.NewDeviceService(deviceRepository, loginRepository)
 
-	twoFaService := twofa.NewTwoFaService(
-		twofaQueries,
-		twofa.WithNotificationManager(notificationManager),
-		twofa.WithUserMapper(userMapper),
-	)
 	// Create a new handle with the domain login service directly
 	loginHandle := loginapi.NewHandle(
 		loginapi.WithLoginService(loginService),
@@ -327,20 +295,17 @@ func main() {
 	// Initialize IAM repository and service
 	iamRepo := iam.NewPostgresIamRepository(iamQueries)
 	iamService := iam.NewIamService(iamRepo)
-	userHandle := iamapi.NewHandle(iamService)
 
 	// Initialize role repository and service
 	roleRepo := role.NewPostgresRoleRepository(roleQueries)
 	roleService := role.NewRoleService(roleRepo)
-	roleHandle := roleapi.NewHandle(roleService)
 
-	// Initialize logins management service and routes
+	// Initialize logins management service
 	loginsQueries := loginsdb.New(pool)
 	loginsServiceOptions := &logins.LoginsServiceOptions{
 		PasswordManager: passwordManager,
 	}
-	loginsService := logins.NewLoginsService(loginsQueries, loginQueries, loginsServiceOptions) // Pass nil for default options
-	loginsHandle := logins.NewHandle(loginsService, *twoFaService)
+	loginsService := logins.NewLoginsService(loginsQueries, loginQueries, loginsServiceOptions)
 
 	signupHandle := signup.NewHandle(
 		signup.WithIamService(*iamService),
@@ -351,26 +316,11 @@ func main() {
 		signup.WithLoginService(*loginService),
 	)
 
-	// Initialize OAuth2 client service and OIDC handler
-	clientService := oauth2client.NewClientService(oauth2client.NewInMemoryOAuth2ClientRepository())
-
-	// Setup default OAuth2 clients through the service layer
-	setupDefaultOAuth2Clients(clientService)
-
-	// Create OIDC repository and service
-	oidcRepository := oidc.NewInMemoryOIDCRepository()
-	oidcService := oidc.NewOIDCServiceWithOptions(
-		oidcRepository,
-		clientService,
-		oidc.WithTokenGenerator(tokenGenerator),
-		oidc.WithBaseURL("http://localhost:4000"),
-		oidc.WithLoginURL("http://localhost:3000/login"),
-	)
-
-	oidcHandle := oidcapi.NewHandle(clientService, oidcService)
-
 	// Initialize External Provider repository and service
 	externalProviderRepository := externalprovider.NewInMemoryExternalProviderRepository()
+
+	// Configure external providers based on environment variables
+	setupExternalProviders(externalProviderRepository, &config.ExternalProviderConfig)
 
 	// Create external provider service
 	slog.Info("Configuring external provider service",
@@ -386,16 +336,13 @@ func main() {
 		externalprovider.WithStateExpiration(10*time.Minute),
 		externalprovider.WithHTTPClient(&http.Client{}),
 		externalprovider.WithNotificationManager(notificationManager),
-		externalprovider.WithUserCreationEnabled(true), // Security by default
-		externalprovider.WithAutoUserCreation(true),    // Security by default
+		externalprovider.WithUserCreationEnabled(true),
+		externalprovider.WithAutoUserCreation(true),
 		externalprovider.WithLoginsService(loginsService),
 		externalprovider.WithIamService(iamService),
 		externalprovider.WithRoleService(roleService),
-		externalprovider.WithDefaultRole(config.ExternalProviderConfig.DefaultRole), // Assign default role to new users
+		externalprovider.WithDefaultRole(config.ExternalProviderConfig.DefaultRole),
 	)
-
-	// Configure external providers based on environment variables
-	setupExternalProviders(externalProviderService, &config.ExternalProviderConfig)
 
 	// Create external provider API handler
 	externalProviderHandle := externalProviderAPI.NewHandle(
@@ -406,11 +353,58 @@ func main() {
 	).WithFrontendURL(config.BaseUrl)
 
 	slog.Info("Registration enabled", "enabled", config.LoginConfig.RegistrationEnabled)
-	server.R.Mount("/api/idm/auth", loginapi.Handler(loginHandle))
-	server.R.Mount("/api/idm/signup", signup.Handler(signupHandle))
 
-	// Mount OIDC endpoints (public, no authentication required)
-	server.R.Mount("/api/idm/oauth2", oidcapi.Handler(oidcHandle))
+	// Mount only specific auth endpoints
+	server.R.Route("/api/idm/auth", func(r chi.Router) {
+		// Magic link endpoints
+		r.Post("/login/magic-link/email", func(w http.ResponseWriter, r *http.Request) {
+			resp := loginHandle.InitiateMagicLinkLoginByEmail(w, r)
+			if resp != nil {
+				render.Render(w, r, resp)
+			}
+		})
+		r.Get("/login/magic-link/validate", func(w http.ResponseWriter, r *http.Request) {
+			params := loginapi.ValidateMagicLinkTokenParams{
+				Token: r.URL.Query().Get("token"),
+			}
+			resp := loginHandle.ValidateMagicLinkToken(w, r, params)
+			if resp != nil {
+				render.Render(w, r, resp)
+			}
+		})
+
+		// 2FA endpoints (needed for magic link flow)
+		r.Post("/2fa/send", func(w http.ResponseWriter, r *http.Request) {
+			resp := loginHandle.Post2faSend(w, r)
+			if resp != nil {
+				render.Render(w, r, resp)
+			}
+		})
+		r.Post("/2fa/validate", func(w http.ResponseWriter, r *http.Request) {
+			resp := loginHandle.Post2faValidate(w, r)
+			if resp != nil {
+				render.Render(w, r, resp)
+			}
+		})
+
+		// Token refresh endpoint
+		r.Post("/token/refresh", func(w http.ResponseWriter, r *http.Request) {
+			resp := loginHandle.PostTokenRefresh(w, r)
+			if resp != nil {
+				render.Render(w, r, resp)
+			}
+		})
+	})
+
+	// Mount only passwordless signup endpoint
+	server.R.Route("/api/idm/signup", func(r chi.Router) {
+		r.Post("/passwordless", func(w http.ResponseWriter, r *http.Request) {
+			resp := signupHandle.RegisterUserPasswordless(w, r)
+			if resp != nil {
+				render.Render(w, r, resp)
+			}
+		})
+	})
 
 	// Mount external provider endpoints (public, no authentication required)
 	server.R.Mount("/api/idm/external", externalProviderAPI.Handler(externalProviderHandle))
@@ -421,70 +415,10 @@ func main() {
 		r.Use(client.Verifier(tokenAuth))
 		r.Use(jwtauth.Authenticator(tokenAuth))
 		r.Use(client.AuthUserMiddleware)
-		r.Get("/me", func(w http.ResponseWriter, r *http.Request) {
-			authUser, ok := r.Context().Value(client.AuthUserKey).(*client.AuthUser)
-			if !ok {
-				slog.Error("Failed getting AuthUser", "ok", ok)
-				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-				return
-			}
 
-			userInfo, err := loginService.GetMe(r.Context(), authUser.UserUuid)
-			if err != nil {
-				slog.Error("Failed getting me", "err", err)
-				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-				return
-			}
-			render.JSON(w, r, userInfo)
-		})
-
-		r.Get("/private", func(w http.ResponseWriter, r *http.Request) {
-			render.PlainText(w, r, http.StatusText(http.StatusOK))
-		})
-
-		profileQueries := profiledb.New(pool)
-		profileRepo := profile.NewPostgresProfileRepository(profileQueries)
-		profileService := profile.NewProfileServiceWithOptions(
-			profileRepo,
-			profile.WithPasswordManager(passwordManager),
-			profile.WithUserMapper(userMapper),
-			profile.WithNotificationManager(notificationManager),
-		)
-		responseHandler := profileapi.NewDefaultResponseHandler()
-		profileHandle := profileapi.NewHandle(profileService, twoFaService, tokenService, tokenCookieService, loginService, deviceService, responseHandler, config.LoginConfig.PhoneVerificationSecret)
-		r.Mount("/api/idm/profile", profileapi.Handler(profileHandle))
-
-		// r.Mount("/auth", authpkg.Handler(authHandle))
-
-		r.Mount("/idm/users", iamapi.SecureHandler(userHandle))
-
-		// Create a secure handler for roles that uses the IAM admin middleware
-		roleRouter := chi.NewRouter()
-		roleRouter.Group(func(r chi.Router) {
-			r.Use(client.AdminRoleMiddleware)
-			r.Mount("/", roleapi.Handler(roleHandle))
-		})
-		r.Mount("/idm/roles", roleRouter)
-
-		// Initialize two factor authentication service and routes
-		twoFaHandle := twofaapi.NewHandle(twoFaService, tokenService, tokenCookieService, userMapper)
-		r.Mount("/idm/2fa", twofaapi.TwoFaHandler(twoFaHandle))
-
+		// Device management routes
 		deviceHandle := deviceapi.NewDeviceHandler(deviceService)
 		r.Mount("/api/idm/device", deviceapi.Handler(deviceHandle))
-
-		loginsRouter := chi.NewRouter()
-		loginsRouter.Group(func(r chi.Router) {
-			r.Use(client.AdminRoleMiddleware)
-			r.Mount("/", logins.Handler(loginsHandle))
-		})
-		r.Mount("/api/idm/logins", loginsRouter)
-
-		// Initialize impersonate service and routes
-		// impersonateService := impersonate.NewService(userMapper, nil)
-		// impersonateHandle := impersonateapi.NewHandler(impersonateService, tokenService, tokenCookieService)
-		// r.Mount("/api/idm/impersonate", impersonateapi.Handler(impersonateHandle))
-
 	})
 
 	app.RoutesHealthzReady(server.R)
@@ -512,7 +446,6 @@ func createPasswordPolicy(config *PasswordComplexityConfig) *login.PasswordPolic
 	slog.Info("Min password age period", "minPasswordAgePeriod", minPasswordAgePeriod)
 
 	// Create a policy based on the configuration
-	// FIX-ME: hard code for bat now
 	return &login.PasswordPolicy{
 		MinLength:            config.RequiredLength,
 		RequireUppercase:     config.RequiredUppercase,
@@ -529,9 +462,7 @@ func createPasswordPolicy(config *PasswordComplexityConfig) *login.PasswordPolic
 }
 
 // setupExternalProviders configures external OAuth2 providers based on environment variables
-func setupExternalProviders(service *externalprovider.ExternalProviderService, config *ExternalProviderConfig) {
-	ctx := context.Background()
-
+func setupExternalProviders(repository externalprovider.ExternalProviderRepository, config *ExternalProviderConfig) {
 	// Configure Google OAuth2 provider
 	if config.GoogleEnabled && config.GoogleClientID != "" && config.GoogleClientSecret != "" {
 		googleProvider := &externalprovider.ExternalProvider{
@@ -554,7 +485,7 @@ func setupExternalProviders(service *externalprovider.ExternalProviderService, c
 			"client_secret_length", len(config.GoogleClientSecret),
 			"enabled", config.GoogleEnabled)
 
-		err := service.CreateProvider(ctx, googleProvider)
+		err := repository.CreateProvider(googleProvider)
 		if err != nil {
 			slog.Error("Failed to create Google provider", "error", err)
 		} else {
@@ -586,7 +517,7 @@ func setupExternalProviders(service *externalprovider.ExternalProviderService, c
 			Description:  "Sign in with your Microsoft account",
 		}
 
-		err := service.CreateProvider(ctx, microsoftProvider)
+		err := repository.CreateProvider(microsoftProvider)
 		if err != nil {
 			slog.Error("Failed to create Microsoft provider", "error", err)
 		} else {
@@ -611,7 +542,7 @@ func setupExternalProviders(service *externalprovider.ExternalProviderService, c
 			Description:  "Sign in with your GitHub account",
 		}
 
-		err := service.CreateProvider(ctx, githubProvider)
+		err := repository.CreateProvider(githubProvider)
 		if err != nil {
 			slog.Error("Failed to create GitHub provider", "error", err)
 		} else {
@@ -636,7 +567,7 @@ func setupExternalProviders(service *externalprovider.ExternalProviderService, c
 			Description:  "Sign in with your LinkedIn account",
 		}
 
-		err := service.CreateProvider(ctx, linkedinProvider)
+		err := repository.CreateProvider(linkedinProvider)
 		if err != nil {
 			slog.Error("Failed to create LinkedIn provider", "error", err)
 		} else {
@@ -649,37 +580,4 @@ func setupExternalProviders(service *externalprovider.ExternalProviderService, c
 		"microsoft", config.MicrosoftEnabled,
 		"github", config.GitHubEnabled,
 		"linkedin", config.LinkedInEnabled)
-}
-
-// setupDefaultOAuth2Clients configures default OAuth2 clients through the service layer
-func setupDefaultOAuth2Clients(service *oauth2client.ClientService) {
-	ctx := context.Background()
-
-	// Configure default Golang demo app client
-	defaultClient := &oauth2client.OAuth2Client{
-		ClientID:      "golang_app",
-		ClientSecret:  "BfCGGjEvIgD5EnnF3Q5EobrW95wK0tOK",
-		ClientName:    "Golang Demo App",
-		RedirectURIs:  []string{"http://localhost:8182/demo/callback"},
-		ResponseTypes: []string{"code"},
-		GrantTypes:    []string{"authorization_code"},
-		Scopes:        []string{"openid", "profile", "email"},
-		ClientType:    "confidential",
-	}
-
-	slog.Info("Creating default OAuth2 client",
-		"client_id", defaultClient.ClientID,
-		"client_name", defaultClient.ClientName,
-		"client_type", defaultClient.ClientType)
-
-	err := service.CreateClient(ctx, defaultClient)
-	if err != nil {
-		slog.Error("Failed to create default OAuth2 client", "error", err, "client_id", defaultClient.ClientID)
-	} else {
-		slog.Info("Default OAuth2 client configured successfully",
-			"client_id", defaultClient.ClientID,
-			"client_name", defaultClient.ClientName)
-	}
-
-	slog.Info("OAuth2 client setup completed")
 }
