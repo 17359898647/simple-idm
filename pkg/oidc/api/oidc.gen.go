@@ -6,6 +6,7 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
@@ -16,9 +17,14 @@ import (
 	"strings"
 
 	"github.com/discord-gophers/goapi-gen/runtime"
+	openapi_types "github.com/discord-gophers/goapi-gen/types"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
+)
+
+const (
+	BearerAuthScopes = "bearerAuth.Scopes"
 )
 
 // ErrorResponse defines model for ErrorResponse.
@@ -31,6 +37,33 @@ type ErrorResponse struct {
 
 	// URI to error documentation
 	ErrorURI *string `json:"error_uri,omitempty"`
+}
+
+// JWK defines model for JWK.
+type JWK struct {
+	// Algorithm
+	Alg *string `json:"alg,omitempty"`
+
+	// RSA public key exponent (base64url encoded)
+	E *string `json:"e,omitempty"`
+
+	// RSA public key modulus (base64url encoded)
+	False *string `json:"false,omitempty"`
+
+	// Key ID
+	Kid *string `json:"kid,omitempty"`
+
+	// Key type
+	Kty *string `json:"kty,omitempty"`
+
+	// Public key use
+	Use *string `json:"use,omitempty"`
+}
+
+// JWKSResponse defines model for JWKSResponse.
+type JWKSResponse struct {
+	// Array of JSON Web Keys
+	Keys []JWK `json:"keys"`
 }
 
 // TokenResponse defines model for TokenResponse.
@@ -51,6 +84,18 @@ type TokenResponse struct {
 	TokenType string `json:"token_type"`
 }
 
+// UserInfoResponse defines model for UserInfoResponse.
+type UserInfoResponse struct {
+	// Email address of the user
+	Email *openapi_types.Email `json:"email,omitempty"`
+
+	// Full name of the user
+	Name *string `json:"name,omitempty"`
+
+	// Subject identifier (user ID)
+	Sub string `json:"sub"`
+}
+
 // AuthorizeParams defines parameters for Authorize.
 type AuthorizeParams struct {
 	// The client identifier
@@ -67,10 +112,19 @@ type AuthorizeParams struct {
 
 	// An opaque value used to maintain state between request and callback
 	State *string `json:"state,omitempty"`
+
+	// PKCE code challenge (RFC 7636)
+	CodeChallenge *string `json:"code_challenge,omitempty"`
+
+	// PKCE code challenge method (RFC 7636)
+	CodeChallengeMethod *AuthorizeParamsCodeChallengeMethod `json:"code_challenge_method,omitempty"`
 }
 
 // AuthorizeParamsResponseType defines parameters for Authorize.
 type AuthorizeParamsResponseType string
+
+// AuthorizeParamsCodeChallengeMethod defines parameters for Authorize.
+type AuthorizeParamsCodeChallengeMethod string
 
 // Response is a common response struct for all the API calls.
 // A Response object may be instantiated via functions for specific operation responses.
@@ -139,6 +193,26 @@ func AuthorizeJSON401Response(body struct {
 	}
 }
 
+// JwksJSON200Response is a constructor method for a Jwks response.
+// A *Response is returned with the configured status code and content type from the spec.
+func JwksJSON200Response(body JWKSResponse) *Response {
+	return &Response{
+		body:        body,
+		Code:        200,
+		contentType: "application/json",
+	}
+}
+
+// JwksJSON500Response is a constructor method for a Jwks response.
+// A *Response is returned with the configured status code and content type from the spec.
+func JwksJSON500Response(body ErrorResponse) *Response {
+	return &Response{
+		body:        body,
+		Code:        500,
+		contentType: "application/json",
+	}
+}
+
 // TokenJSON200Response is a constructor method for a Token response.
 // A *Response is returned with the configured status code and content type from the spec.
 func TokenJSON200Response(body TokenResponse) *Response {
@@ -169,14 +243,60 @@ func TokenJSON401Response(body ErrorResponse) *Response {
 	}
 }
 
+// UserinfoJSON200Response is a constructor method for a Userinfo response.
+// A *Response is returned with the configured status code and content type from the spec.
+func UserinfoJSON200Response(body UserInfoResponse) *Response {
+	return &Response{
+		body:        body,
+		Code:        200,
+		contentType: "application/json",
+	}
+}
+
+// UserinfoJSON401Response is a constructor method for a Userinfo response.
+// A *Response is returned with the configured status code and content type from the spec.
+func UserinfoJSON401Response(body ErrorResponse) *Response {
+	return &Response{
+		body:        body,
+		Code:        401,
+		contentType: "application/json",
+	}
+}
+
+// UserinfoJSON403Response is a constructor method for a Userinfo response.
+// A *Response is returned with the configured status code and content type from the spec.
+func UserinfoJSON403Response(body ErrorResponse) *Response {
+	return &Response{
+		body:        body,
+		Code:        403,
+		contentType: "application/json",
+	}
+}
+
+// UserinfoJSON500Response is a constructor method for a Userinfo response.
+// A *Response is returned with the configured status code and content type from the spec.
+func UserinfoJSON500Response(body ErrorResponse) *Response {
+	return &Response{
+		body:        body,
+		Code:        500,
+		contentType: "application/json",
+	}
+}
+
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
 	// OAuth2 Authorization Endpoint
 	// (GET /authorize)
 	Authorize(w http.ResponseWriter, r *http.Request, params AuthorizeParams) *Response
+	// JSON Web Key Set Endpoint
+	// (GET /jwks)
+	Jwks(w http.ResponseWriter, r *http.Request) *Response
 	// OAuth2 Token Endpoint
 	// (POST /token)
 	Token(w http.ResponseWriter, r *http.Request) *Response
+	// OIDC UserInfo Endpoint
+	// (GET /userinfo)
+	Userinfo(w http.ResponseWriter, r *http.Request) *Response
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -232,8 +352,42 @@ func (siw *ServerInterfaceWrapper) Authorize(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// ------------- Optional query parameter "code_challenge" -------------
+
+	if err := runtime.BindQueryParameter("form", true, false, "code_challenge", r.URL.Query(), &params.CodeChallenge); err != nil {
+		err = fmt.Errorf("invalid format for parameter code_challenge: %w", err)
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{err, "code_challenge"})
+		return
+	}
+
+	// ------------- Optional query parameter "code_challenge_method" -------------
+
+	if err := runtime.BindQueryParameter("form", true, false, "code_challenge_method", r.URL.Query(), &params.CodeChallengeMethod); err != nil {
+		err = fmt.Errorf("invalid format for parameter code_challenge_method: %w", err)
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{err, "code_challenge_method"})
+		return
+	}
+
 	var handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := siw.Handler.Authorize(w, r, params)
+		if resp != nil {
+			if resp.body != nil {
+				render.Render(w, r, resp)
+			} else {
+				w.WriteHeader(resp.Code)
+			}
+		}
+	})
+
+	handler(w, r.WithContext(ctx))
+}
+
+// Jwks operation middleware
+func (siw *ServerInterfaceWrapper) Jwks(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := siw.Handler.Jwks(w, r)
 		if resp != nil {
 			if resp.body != nil {
 				render.Render(w, r, resp)
@@ -252,6 +406,26 @@ func (siw *ServerInterfaceWrapper) Token(w http.ResponseWriter, r *http.Request)
 
 	var handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := siw.Handler.Token(w, r)
+		if resp != nil {
+			if resp.body != nil {
+				render.Render(w, r, resp)
+			} else {
+				w.WriteHeader(resp.Code)
+			}
+		}
+	})
+
+	handler(w, r.WithContext(ctx))
+}
+
+// Userinfo operation middleware
+func (siw *ServerInterfaceWrapper) Userinfo(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{""})
+
+	var handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := siw.Handler.Userinfo(w, r)
 		if resp != nil {
 			if resp.body != nil {
 				render.Render(w, r, resp)
@@ -380,7 +554,9 @@ func Handler(si ServerInterface, opts ...ServerOption) http.Handler {
 
 	r.Route(options.BaseURL, func(r chi.Router) {
 		r.Get("/authorize", wrapper.Authorize)
+		r.Get("/jwks", wrapper.Jwks)
 		r.Post("/token", wrapper.Token)
+		r.Get("/userinfo", wrapper.Userinfo)
 	})
 	return r
 }
@@ -406,27 +582,44 @@ func WithErrorHandler(handler func(w http.ResponseWriter, r *http.Request, err e
 // Base64 encoded, gzipped, json marshaled Swagger object
 var swaggerSpec = []string{
 
-	"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",
+	"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",
+	"AA==",
 }
 
 // GetSwagger returns the content of the embedded swagger specification file
