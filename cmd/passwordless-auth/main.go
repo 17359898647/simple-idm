@@ -15,6 +15,7 @@ import (
 	"github.com/tendant/chi-demo/app"
 	dbutils "github.com/tendant/db-utils/db"
 	"github.com/tendant/simple-idm/pkg/client"
+	"github.com/tendant/simple-idm/pkg/config"
 	"github.com/tendant/simple-idm/pkg/device"
 	deviceapi "github.com/tendant/simple-idm/pkg/device/api"
 	"github.com/tendant/simple-idm/pkg/externalprovider"
@@ -28,7 +29,6 @@ import (
 	"github.com/tendant/simple-idm/pkg/logins/loginsdb"
 	"github.com/tendant/simple-idm/pkg/mapper"
 	"github.com/tendant/simple-idm/pkg/mapper/mapperdb"
-	"github.com/tendant/simple-idm/pkg/notice"
 	"github.com/tendant/simple-idm/pkg/notification"
 	"github.com/tendant/simple-idm/pkg/role"
 	"github.com/tendant/simple-idm/pkg/role/roledb"
@@ -85,18 +85,8 @@ type TwilioConfig struct {
 	TwilioFrom       string `env:"TWILIO_FROM"`
 }
 
-type PasswordComplexityConfig struct {
-	RequiredDigit           bool   `env:"PASSWORD_COMPLEXITY_REQUIRE_DIGIT" env-default:"true"`
-	RequiredLowercase       bool   `env:"PASSWORD_COMPLEXITY_REQUIRE_LOWERCASE" env-default:"true"`
-	RequiredNonAlphanumeric bool   `env:"PASSWORD_COMPLEXITY_REQUIRE_NON_ALPHANUMERIC" env-default:"true"`
-	RequiredUppercase       bool   `env:"PASSWORD_COMPLEXITY_REQUIRE_UPPERCASE" env-default:"true"`
-	RequiredLength          int    `env:"PASSWORD_COMPLEXITY_REQUIRED_LENGTH" env-default:"8"`
-	DisallowCommonPwds      bool   `env:"PASSWORD_COMPLEXITY_DISALLOW_COMMON_PWDS" env-default:"true"`
-	MaxRepeatedChars        int    `env:"PASSWORD_COMPLEXITY_MAX_REPEATED_CHARS" env-default:"3"`
-	HistoryCheckCount       int    `env:"PASSWORD_COMPLEXITY_HISTORY_CHECK_COUNT" env-default:"0"`
-	ExpirationPeriod        string `env:"PASSWORD_COMPLEXITY_EXPIRATION_PERIOD" env-default:"P100Y"`      // 100 years
-	MinPasswordAgePeriod    string `env:"PASSWORD_COMPLEXITY_MIN_PASSWORD_AGE_PERIOD" env-default:"PT0M"` // 0 minutes
-}
+// PasswordComplexityConfig is now defined in pkg/config package
+type PasswordComplexityConfig = config.PasswordComplexityConfig
 
 type LoginConfig struct {
 	MaxFailedAttempts        int    `env:"LOGIN_MAX_FAILED_ATTEMPTS" env-default:"10000"`
@@ -158,8 +148,7 @@ func main() {
 
 	server := app.DefaultApp()
 
-	app.RoutesHealthz(server.R)
-	app.RoutesHealthzReady(server.R)
+	app.RegisterHealthzRoutes(server.R)
 
 	dbConfig := config.IdmDbConfig.toDbConfig()
 	pool, err := dbutils.NewDbPool(context.Background(), dbConfig)
@@ -173,12 +162,14 @@ func main() {
 	iamQueries := iamdb.New(pool)
 	loginQueries := logindb.New(pool)
 	twofaQueries := twofadb.New(pool)
+	twofaRepo := twofa.NewPostgresTwoFARepository(twofaQueries)
 	mapperQueries := mapperdb.New(pool)
+	mapperRepo := mapper.NewPostgresMapperRepository(mapperQueries)
 
 	// Initialize NotificationManager and register email notifier
-	notificationManager, err := notice.NewNotificationManager(
+	notificationManager, err := notification.NewNotificationManagerWithOptions(
 		config.BaseUrl,
-		notice.WithSMTP(notification.SMTPConfig{
+		notification.WithSMTP(notification.SMTPConfig{
 			Host:     config.EmailConfig.Host,
 			Port:     int(config.EmailConfig.Port),
 			Username: config.EmailConfig.Username,
@@ -186,18 +177,18 @@ func main() {
 			From:     config.EmailConfig.From,
 			TLS:      config.EmailConfig.TLS,
 		}),
-		notice.WithTwilio(notification.TwilioConfig{
+		notification.WithTwilio(notification.TwilioConfig{
 			TwilioAccountSid: config.TwilioConfig.TwilioAccountSid,
 			TwilioAuthToken:  config.TwilioConfig.TwilioAuthToken,
 			TwilioFrom:       config.TwilioConfig.TwilioFrom,
 		}),
-		notice.WithDefaultTemplates(),
+		notification.WithDefaultTemplates(),
 	)
 	if err != nil {
 		slog.Error("Failed initialize notification manager", "err", err)
 	}
 
-	userMapper := mapper.NewDefaultUserMapper(mapperQueries)
+	userMapper := mapper.NewDefaultUserMapper(mapperRepo)
 	delegatedUserMapper := &mapper.DefaultDelegatedUserMapper{}
 
 	// Create a password policy based on the environment
@@ -257,7 +248,7 @@ func main() {
 	)
 
 	twoFaService := twofa.NewTwoFaService(
-		twofaQueries,
+		twofaRepo,
 		twofa.WithNotificationManager(notificationManager),
 		twofa.WithUserMapper(userMapper),
 	)
@@ -278,7 +269,7 @@ func main() {
 		ExpiryDuration: deviceExpiryDuration,
 	}
 	deviceRepository := device.NewPostgresDeviceRepositoryWithOptions(pool, deviceRepositoryOptions)
-	deviceService := device.NewDeviceService(deviceRepository, loginRepository)
+	deviceService := device.NewDeviceService(deviceRepository)
 
 	// Create a new handle with the domain login service directly
 	loginHandle := loginapi.NewHandle(
@@ -302,12 +293,13 @@ func main() {
 
 	// Initialize logins management service
 	loginsQueries := loginsdb.New(pool)
+	loginsRepo := logins.NewPostgresLoginsRepository(loginsQueries)
 	loginsServiceOptions := &logins.LoginsServiceOptions{
 		PasswordManager: passwordManager,
 	}
-	loginsService := logins.NewLoginsService(loginsQueries, loginQueries, loginsServiceOptions)
+	loginsService := logins.NewLoginsService(loginsRepo, loginQueries, loginsServiceOptions)
 
-	signupHandle := signup.NewHandle(
+	signupHandle := signup.NewHandleWithOptions(
 		signup.WithIamService(*iamService),
 		signup.WithRoleService(*roleService),
 		signup.WithLoginsService(*loginsService),
@@ -421,44 +413,12 @@ func main() {
 		r.Mount("/api/idm/device", deviceapi.Handler(deviceHandle))
 	})
 
-	app.RoutesHealthzReady(server.R)
 	server.Run()
 }
 
-func createPasswordPolicy(config *PasswordComplexityConfig) *login.PasswordPolicy {
-	// If no config is provided, use the default policy
-	if config == nil {
-		return login.DefaultPasswordPolicy()
-	}
-
-	expirationPeriod, err := duration.Parse(config.ExpirationPeriod)
-	if err != nil {
-		slog.Error("Failed to parse expiration period", "err", err)
-	}
-
-	slog.Info("Expiration period", "expirationPeriod", expirationPeriod)
-
-	minPasswordAgePeriod, err := duration.Parse(config.MinPasswordAgePeriod)
-	if err != nil {
-		slog.Error("Failed to parse min password age period", "err", err)
-	}
-
-	slog.Info("Min password age period", "minPasswordAgePeriod", minPasswordAgePeriod)
-
-	// Create a policy based on the configuration
-	return &login.PasswordPolicy{
-		MinLength:            config.RequiredLength,
-		RequireUppercase:     config.RequiredUppercase,
-		RequireLowercase:     config.RequiredLowercase,
-		RequireDigit:         config.RequiredDigit,
-		RequireSpecialChar:   config.RequiredNonAlphanumeric,
-		DisallowCommonPwds:   config.DisallowCommonPwds,
-		MaxRepeatedChars:     config.MaxRepeatedChars,
-		HistoryCheckCount:    config.HistoryCheckCount,
-		ExpirationPeriod:     expirationPeriod.ToTimeDuration(),
-		CommonPasswordsPath:  "",
-		MinPasswordAgePeriod: minPasswordAgePeriod.ToTimeDuration(),
-	}
+// createPasswordPolicy now delegates to the shared config.ToPasswordPolicy method
+func createPasswordPolicy(cfg *PasswordComplexityConfig) *login.PasswordPolicy {
+	return cfg.ToPasswordPolicy()
 }
 
 // setupExternalProviders configures external OAuth2 providers based on environment variables

@@ -17,15 +17,6 @@ func TestJWKSService(t *testing.T) {
 		assert.NotEmpty(t, service.activeKeyID) // Should have generated initial key
 	})
 
-	t.Run("NewJWKSService_WithRepository", func(t *testing.T) {
-		repo := NewInMemoryJWKSRepository()
-		service, err := NewJWKSService(repo)
-		require.NoError(t, err)
-		assert.NotNil(t, service)
-		assert.Equal(t, repo, service.repository)
-		assert.NotEmpty(t, service.activeKeyID) // Should have generated initial key
-	})
-
 	t.Run("GetJWKS", func(t *testing.T) {
 		service, err := NewJWKSServiceWithInMemoryStorage()
 		require.NoError(t, err)
@@ -196,30 +187,10 @@ func TestJWKSService(t *testing.T) {
 		}
 	})
 
-	t.Run("Service_With_Empty_Repository", func(t *testing.T) {
-		repo := NewInMemoryJWKSRepository()
-
-		// Create service with empty repository
-		service, err := NewJWKSService(repo)
-		require.NoError(t, err)
-
-		// Should have generated initial key
-		activeKey, err := service.GetActiveSigningKey()
-		require.NoError(t, err)
-		assert.NotNil(t, activeKey)
-		assert.True(t, activeKey.Active)
-
-		// JWKS should contain the initial key
-		jwks, err := service.GetJWKS()
-		require.NoError(t, err)
-		assert.Len(t, jwks.Keys, 1)
-	})
-
 	t.Run("Service_With_Existing_Keys", func(t *testing.T) {
-		repo := NewInMemoryJWKSRepository()
 
 		// Add a key to the repository first
-		privateKey, err := generateRSAKeyPair(2048)
+		privateKey, err := GenerateRSAKeyPair(2048)
 		require.NoError(t, err)
 
 		existingKey := &KeyPair{
@@ -227,15 +198,10 @@ func TestJWKSService(t *testing.T) {
 			Alg:        "RS256",
 			PrivateKey: privateKey,
 			PublicKey:  &privateKey.PublicKey,
-			CreatedAt:  time.Now().Unix(),
+			CreatedAt:  time.Now().UTC(),
 			Active:     true,
 		}
-
-		err = repo.AddKey(nil, existingKey)
-		require.NoError(t, err)
-
-		// Create service with repository that has existing keys
-		service, err := NewJWKSService(repo)
+		service, err := NewJWKSServiceWithKey(existingKey)
 		require.NoError(t, err)
 
 		// Should use existing active key

@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -145,13 +144,20 @@ func (h *DefaultResponseHandler) PrepareUserSelectionResponse(idmUsers []mapper.
 		email := mu.UserInfo.Email
 		name := mu.DisplayName
 		id := mu.UserId
-		role := mu.ExtraClaims["roles"].([]string)
+
+		// Use the Roles field directly - it's always populated and safe
+		roles := mu.Roles
+		var firstRole string
+		if len(roles) > 0 {
+			firstRole = roles[0]
+		}
 
 		apiUsers[i] = User{
 			ID:    id,
 			Email: email,
 			Name:  name,
-			Role:  role[0],
+			Role:  firstRole, // Backward compatibility
+			Roles: roles,     // New array field
 		}
 	}
 
@@ -173,10 +179,18 @@ func (h *DefaultResponseHandler) PrepareUserListResponse(users []mapper.User) *R
 			email = user.UserInfo.Email
 		}
 
+		// Use the Roles field directly - it's always populated and safe
+		roles := user.Roles
+		var firstRole string
+		if len(roles) > 0 {
+			firstRole = roles[0]
+		}
+
 		apiUsers = append(apiUsers, User{
 			ID:    user.UserId,
 			Name:  user.DisplayName,
-			Role:  user.ExtraClaims["roles"].([]string)[0],
+			Role:  firstRole, // Backward compatibility
+			Roles: roles,     // New array field
 			Email: email,
 		})
 	}
@@ -193,10 +207,18 @@ func (h *DefaultResponseHandler) PrepareUserSwitchResponse(users []mapper.User) 
 			email = user.UserInfo.Email
 		}
 
+		// Use the Roles field directly - it's always populated and safe
+		roles := user.Roles
+		var firstRole string
+		if len(roles) > 0 {
+			firstRole = roles[0]
+		}
+
 		apiUsers = append(apiUsers, User{
 			ID:    user.UserId,
 			Name:  user.DisplayName,
-			Role:  user.ExtraClaims["roles"].([]string)[0],
+			Role:  firstRole, // Backward compatibility
+			Roles: roles,     // New array field
 			Email: email,
 		})
 	}
@@ -399,9 +421,7 @@ func (h Handle) PostLogin(w http.ResponseWriter, r *http.Request) *Response {
 		}
 	}
 
-	// Log username and hashed password
-	passwordHash := fmt.Sprintf("%x", sha256.Sum256([]byte(data.Password)))
-	slog.Info("Login request", "username", data.Username, "password_hash", passwordHash)
+	slog.Info("Login request", "username", data.Username)
 
 	// Get IP address and user agent for login attempt recording
 	ipAddress := getIPAddressFromRequest(r)
@@ -470,11 +490,19 @@ func (h Handle) PostLogin(w http.ResponseWriter, r *http.Request) *Response {
 		email := mu.UserInfo.Email
 		name := mu.DisplayName
 
+		// Use the Roles field directly - it's always populated and safe
+		roles := mu.Roles
+		var firstRole string
+		if len(roles) > 0 {
+			firstRole = roles[0]
+		}
+
 		apiUsers[i] = User{
 			ID:    mu.UserId,
 			Name:  name,
 			Email: email,
-			Role:  mu.ExtraClaims["roles"].([]string)[0],
+			Role:  firstRole, // Backward compatibility
+			Roles: roles,     // New array field
 		}
 	}
 
@@ -599,9 +627,7 @@ func (h Handle) LoginByEmail(w http.ResponseWriter, r *http.Request) *Response {
 		}
 	}
 
-	// Log email and hashed password
-	passwordHash := fmt.Sprintf("%x", sha256.Sum256([]byte(data.Password)))
-	slog.Info("Email login request", "email", data.Email, "password_hash", passwordHash)
+	slog.Info("Email login request", "email", data.Email)
 
 	// Get IP address and user agent for login attempt recording
 	ipAddress := getIPAddressFromRequest(r)
@@ -666,8 +692,16 @@ func (h Handle) LoginByEmail(w http.ResponseWriter, r *http.Request) *Response {
 		email := mu.UserInfo.Email
 		name := mu.DisplayName
 
+		// Use the Roles field directly - it's always populated and safe
+		roles := mu.Roles
+		var firstRole string
+		if len(roles) > 0 {
+			firstRole = roles[0]
+		}
+
 		apiUsers[i] = User{
-			Role:  mu.ExtraClaims["roles"].([]string)[0], // Assuming roles is a slice of strings
+			Role:  firstRole, // Backward compatibility
+			Roles: roles,     // New array field
 			ID:    mu.UserId,
 			Name:  name,
 			Email: email,
@@ -1191,7 +1225,7 @@ func (h Handle) PostUserSwitch(w http.ResponseWriter, r *http.Request) *Response
 		slog.Error("No Temp Token Cookie", "err", err)
 		return &Response{
 			Code: http.StatusUnauthorized,
-			body: "Missing temp token cookie",
+			body: "Your session has expired. Please start the login process again.",
 		}
 	}
 	tokenStr := cookie.Value
@@ -1620,7 +1654,7 @@ func (h Handle) Post2faSend(w http.ResponseWriter, r *http.Request) *Response {
 		slog.Error("No Temp Token Cookie", "err", err)
 		return &Response{
 			Code: http.StatusUnauthorized,
-			body: "Missing temp token cookie",
+			body: "Your session has expired. Please start the login process again.",
 		}
 	}
 	tokenStr := cookie.Value
@@ -1684,7 +1718,7 @@ func (h Handle) Post2faValidate(w http.ResponseWriter, r *http.Request) *Respons
 		slog.Error("No Temp Token Cookie", "err", err)
 		return &Response{
 			Code: http.StatusUnauthorized,
-			body: "Missing temp token cookie",
+			body: "Your session has expired. Please start the login process again.",
 		}
 	}
 	tokenStr := cookie.Value
@@ -1929,7 +1963,7 @@ func (h Handle) PostMobile2faSend(w http.ResponseWriter, r *http.Request) *Respo
 		slog.Error("No temp token in request body")
 		return &Response{
 			Code: http.StatusBadRequest,
-			body: "Missing temp token in request body",
+			body: "Your session has expired. Please start the login process again.",
 		}
 	}
 	tokenStr := data.TempToken
@@ -1998,7 +2032,7 @@ func (h Handle) PostMobile2faValidate(w http.ResponseWriter, r *http.Request) *R
 		slog.Error("No temp token in request body")
 		return &Response{
 			Code: http.StatusBadRequest,
-			body: "Missing temp token in request body",
+			body: "Your session has expired. Please start the login process again.",
 		}
 	}
 	tokenStr := data.TempToken
@@ -2523,11 +2557,19 @@ func (h Handle) ValidateMagicLinkToken(w http.ResponseWriter, r *http.Request, p
 		email := mu.UserInfo.Email
 		name := mu.DisplayName
 
+		// Use the Roles field directly - it's always populated and safe
+		roles := mu.Roles
+		var firstRole string
+		if len(roles) > 0 {
+			firstRole = roles[0]
+		}
+
 		apiUsers[i] = User{
 			ID:    mu.UserId,
 			Name:  name,
 			Email: email,
-			Role:  mu.ExtraClaims["roles"].([]string)[0],
+			Role:  firstRole, // Backward compatibility
+			Roles: roles,     // New array field
 		}
 	}
 

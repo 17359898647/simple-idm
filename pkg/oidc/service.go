@@ -5,11 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"github.com/tendant/simple-idm/pkg/mapper"
 	"github.com/tendant/simple-idm/pkg/oauth2client"
 	"github.com/tendant/simple-idm/pkg/pkce"
 	"github.com/tendant/simple-idm/pkg/tokengenerator"
@@ -44,9 +47,10 @@ type ErrorResponse struct {
 
 // UserInfoResponse represents OIDC user information response
 type UserInfoResponse struct {
-	Sub   string  `json:"sub"`             // Subject identifier (required)
-	Name  *string `json:"name,omitempty"`  // Full name
-	Email *string `json:"email,omitempty"` // Email address
+	Sub    string    `json:"sub"`              // Subject identifier (required)
+	Name   *string   `json:"name,omitempty"`   // Full name
+	Email  *string   `json:"email,omitempty"`  // Email address
+	Groups *[]string `json:"groups,omitempty"` // User groups
 }
 
 // OIDCService provides OIDC business logic operations
@@ -54,10 +58,12 @@ type OIDCService struct {
 	repository      OIDCRepository
 	clientService   *oauth2client.ClientService
 	tokenGenerator  tokengenerator.TokenGenerator
+	userMapper      mapper.UserMapper
 	codeExpiration  time.Duration
 	tokenExpiration time.Duration
 	baseURL         string
 	loginURL        string
+	issuer          string
 }
 
 // Option is a function that configures an OIDCService
@@ -98,6 +104,20 @@ func WithTokenGenerator(generator tokengenerator.TokenGenerator) Option {
 	}
 }
 
+// WithUserMapper sets the user mapper for fetching user data
+func WithUserMapper(userMapper mapper.UserMapper) Option {
+	return func(s *OIDCService) {
+		s.userMapper = userMapper
+	}
+}
+
+// WithIssuer sets the issuer URL for JWT tokens
+func WithIssuer(issuer string) Option {
+	return func(s *OIDCService) {
+		s.issuer = issuer
+	}
+}
+
 // OIDCServiceOptions contains optional parameters for creating an OIDCService (deprecated)
 type OIDCServiceOptions struct {
 	CodeExpiration  time.Duration
@@ -114,6 +134,7 @@ func NewOIDCServiceWithOptions(repository OIDCRepository, clientService *oauth2c
 		clientService:   clientService,
 		codeExpiration:  10 * time.Minute,
 		tokenExpiration: time.Hour,
+		issuer:          "simple-idm", // Default issuer for backward compatibility
 	}
 
 	// Apply all options
@@ -246,8 +267,8 @@ func (s *OIDCService) validatePKCE(codeVerifier, codeChallenge, codeChallengeMet
 func (s *OIDCService) GenerateAccessToken(ctx context.Context, userID, clientID, scope string) (string, error) {
 	// Prepare root modifications for standard JWT claims
 	rootModifications := map[string]interface{}{
-		"aud": clientID,     // Audience (client ID)
-		"iss": "simple-idm", // Issuer
+		"aud": []string{clientID}, // Audience (client ID)
+		"iss": s.issuer,           // Issuer (configurable)
 	}
 
 	// Prepare extra claims for OIDC-specific data
@@ -262,26 +283,87 @@ func (s *OIDCService) GenerateAccessToken(ctx context.Context, userID, clientID,
 	if err != nil {
 		return "", fmt.Errorf("failed to generate access token using TokenGenerator: %w", err)
 	}
-
 	return tokenString, nil
 }
 
-func (s *OIDCService) GenerateRefreshToken(ctx context.Context, userID, clientID, scope string) (string, error) {
+// func (s *OIDCService) GenerateRefreshToken(ctx context.Context, userID, clientID, scope string) (string, error) {
+// 	// Prepare root modifications for standard JWT claims
+// 	rootModifications := map[string]interface{}{
+// 		"aud": clientID,     // Audience (client ID)
+// 		"iss": "simple-idm", // Issuer
+// 	}
+// 	// Prepare extra claims for OIDC-specific data
+// 	extraClaims := map[string]interface{}{
+// 		"scope":     scope,     // Granted scopes
+// 		"token_use": "refresh", // Token usage type
+// 		"user_id":   userID,    // User ID
+// 		"client_id": clientID,  // Client ID
+// 	}
+// 	tokenString, _, err := s.tokenGenerator.GenerateToken(userID, s.tokenExpiration, rootModifications, extraClaims)
+// 	if err != nil {
+// 		return "", fmt.Errorf("failed to generate refresh token using TokenGenerator: %w", err)
+// 	}
+// 	return tokenString, nil
+// }
+
+// GenerateIDToken creates an OIDC ID token (JWT) for the user
+func (s *OIDCService) GenerateIDToken(ctx context.Context, userID, clientID, scope string) (string, error) {
+	if s.userMapper == nil {
+		slog.Error("UserMapper not configured")
+		return "", fmt.Errorf("user mapper not configured")
+	}
+	slog.Info("generating ID token", "userID", userID, "clientID", clientID, "scope", scope)
 	// Prepare root modifications for standard JWT claims
 	rootModifications := map[string]interface{}{
-		"aud": clientID,     // Audience (client ID)
-		"iss": "simple-idm", // Issuer
+		"aud": []string{clientID}, // Audience (client ID)
+		"iss": s.issuer,           // Issuer (configurable)
 	}
-	// Prepare extra claims for OIDC-specific data
-	extraClaims := map[string]interface{}{
-		"scope":     scope,     // Granted scopes
-		"token_use": "refresh", // Token usage type
-		"user_id":   userID,    // User ID
-		"client_id": clientID,  // Client ID
+
+	// Fetch real user data if UserMapper is available
+	if userUUID, err := uuid.Parse(userID); err == nil {
+		if user, err := s.userMapper.GetUserByUserID(ctx, userUUID); err == nil {
+			slog.Info("user info from user mapper", "user", user)
+			// Add OIDC-specific claims based on scope using real user data
+			if containsScope(scope, "profile") {
+				if user.DisplayName != "" {
+					rootModifications["username"] = user.DisplayName
+				}
+			}
+
+			if containsScope(scope, "email") {
+				if user.UserInfo.Email != "" {
+					rootModifications["email"] = user.UserInfo.Email
+					rootModifications["email_verified"] = user.UserInfo.EmailVerified
+				}
+			}
+
+			// Add phone number support (new feature)
+			if containsScope(scope, "phone") {
+				if user.UserInfo.PhoneNumber != "" {
+					rootModifications["phone_number"] = user.UserInfo.PhoneNumber
+					rootModifications["phone_number_verified"] = user.UserInfo.PhoneNumberVerified
+				}
+			}
+
+			// Add groups support for OIDC groups claim
+			if containsScope(scope, "groups") {
+				slog.Info("contains groups scope", "group", user.Groups)
+				if len(user.Groups) > 0 {
+					rootModifications["groups"] = user.Groups
+				}
+			}
+		} else {
+			// Log error but continue with empty values
+			fmt.Printf("Warning: Failed to fetch user data for ID %s: %v\n", userID, err)
+		}
+	} else {
+		// Log error but continue with empty values
+		fmt.Printf("Warning: Failed to parse user ID as UUID: %s\n", userID)
 	}
-	tokenString, _, err := s.tokenGenerator.GenerateToken(userID, s.tokenExpiration, rootModifications, extraClaims)
+
+	tokenString, _, err := s.tokenGenerator.GenerateToken(userID, s.tokenExpiration, rootModifications, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to generate refresh token using TokenGenerator: %w", err)
+		return "", fmt.Errorf("failed to generate ID token using TokenGenerator: %w", err)
 	}
 	return tokenString, nil
 }
@@ -394,15 +476,15 @@ type TokenRequest struct {
 
 // TokenExchangeResponse represents the result of a token exchange
 type TokenExchangeResponse struct {
-	Success      bool
-	AccessToken  string
-	RefreshToken string
-	TokenType    string
-	ExpiresIn    int
-	Scope        string
-	ErrorCode    string
-	ErrorDesc    string
-	HTTPStatus   int
+	Success     bool
+	IDToken     string
+	AccessToken string
+	TokenType   string
+	ExpiresIn   int
+	Scope       string
+	ErrorCode   string
+	ErrorDesc   string
+	HTTPStatus  int
 }
 
 // ProcessAuthorizationRequest handles the complete OAuth2 authorization flow
@@ -415,6 +497,7 @@ func (s *OIDCService) ProcessAuthorizationRequest(ctx context.Context, req Autho
 		req.Scope,
 	)
 	if err != nil {
+		slog.Error("Authorization request validation failed", "error", err.Error())
 		return &AuthorizationResponse{
 			Success:    false,
 			ErrorCode:  "invalid_request",
@@ -426,6 +509,7 @@ func (s *OIDCService) ProcessAuthorizationRequest(ctx context.Context, req Autho
 	// 2. Check if user is authenticated
 	userClaims, err := s.ValidateUserToken(req.AccessToken)
 	if err != nil {
+		slog.Info("User not authenticated, redirecting to login", "error", err.Error())
 		// Build the full authorization URL to redirect back to after login
 		authURL := fmt.Sprintf("%s%s", s.GetBaseURL(), req.RequestURL)
 		loginURL := s.BuildLoginRedirectURL(authURL)
@@ -440,6 +524,7 @@ func (s *OIDCService) ProcessAuthorizationRequest(ctx context.Context, req Autho
 	// 3. Extract user ID from claims
 	userID, ok := userClaims["sub"].(string)
 	if !ok || userID == "" {
+		slog.Error("Invalid or missing user ID in token", "userID", userID)
 		return &AuthorizationResponse{
 			Success:    false,
 			ErrorCode:  "invalid_token",
@@ -452,6 +537,7 @@ func (s *OIDCService) ProcessAuthorizationRequest(ctx context.Context, req Autho
 	var authCode string
 	if req.CodeChallenge != nil && *req.CodeChallenge != "" {
 		// PKCE flow
+		slog.Info("Processing PKCE authorization request")
 		codeChallenge := *req.CodeChallenge
 		codeChallengeMethod := string(pkce.ChallengeS256) // Default to S256
 		if req.CodeChallengeMethod != nil {
@@ -462,12 +548,14 @@ func (s *OIDCService) ProcessAuthorizationRequest(ctx context.Context, req Autho
 			ctx, client.ClientID, req.RedirectURI, req.Scope, req.State, userID,
 			codeChallenge, codeChallengeMethod)
 	} else {
+		slog.Info("No PKCE support, processing standard authorization request")
 		// Standard flow (backward compatibility)
 		authCode, err = s.GenerateAuthorizationCode(
 			ctx, client.ClientID, req.RedirectURI, req.Scope, req.State, userID)
 	}
 
 	if err != nil {
+		slog.Error("Failed to generate authorization code", "error", err.Error())
 		return &AuthorizationResponse{
 			Success:    false,
 			ErrorCode:  "server_error",
@@ -479,6 +567,7 @@ func (s *OIDCService) ProcessAuthorizationRequest(ctx context.Context, req Autho
 	// 5. Build callback URL and redirect
 	callbackURL, err := s.BuildCallbackURL(req.RedirectURI, authCode, req.State)
 	if err != nil {
+		slog.Error("Failed to build callback URL", "error", err.Error())
 		return &AuthorizationResponse{
 			Success:    false,
 			ErrorCode:  "server_error",
@@ -519,6 +608,7 @@ func (s *OIDCService) ProcessTokenRequest(ctx context.Context, req TokenRequest)
 	// Validate client credentials
 	client, err := s.clientService.ValidateClientCredentials(req.ClientID, req.ClientSecret)
 	if err != nil {
+		slog.Error("Client credentials validation failed", "error", err.Error())
 		return &TokenExchangeResponse{
 			Success:    false,
 			ErrorCode:  "invalid_client",
@@ -538,6 +628,7 @@ func (s *OIDCService) ProcessTokenRequest(ctx context.Context, req TokenRequest)
 	}
 
 	if err != nil {
+		slog.Error("Authorization code validation failed", "error", err.Error())
 		return &TokenExchangeResponse{
 			Success:    false,
 			ErrorCode:  "invalid_grant",
@@ -546,35 +637,30 @@ func (s *OIDCService) ProcessTokenRequest(ctx context.Context, req TokenRequest)
 		}
 	}
 
-	// Generate access token
+	// Generate ID token
+	idToken, err := s.GenerateIDToken(ctx, authCode.UserID, client.ClientID, authCode.Scope)
+	if err != nil {
+		slog.Error("ID token generation failed", "error", err.Error())
+		return &TokenExchangeResponse{
+			Success:    false,
+			ErrorCode:  "server_error",
+			ErrorDesc:  "Failed to generate ID token",
+			HTTPStatus: 500,
+		}
+	}
+
 	accessToken, err := s.GenerateAccessToken(ctx, authCode.UserID, client.ClientID, authCode.Scope)
 	if err != nil {
-		return &TokenExchangeResponse{
-			Success:    false,
-			ErrorCode:  "server_error",
-			ErrorDesc:  "Failed to generate access token",
-			HTTPStatus: 500,
-		}
+		slog.Error("Access token generation failed", "error", err.Error())
 	}
-
-	refreshToken, err := s.GenerateRefreshToken(ctx, authCode.UserID, client.ClientID, authCode.Scope)
-	if err != nil {
-		return &TokenExchangeResponse{
-			Success:    false,
-			ErrorCode:  "server_error",
-			ErrorDesc:  "Failed to generate refresh token",
-			HTTPStatus: 500,
-		}
-	}
-
 	return &TokenExchangeResponse{
-		Success:      true,
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		TokenType:    "Bearer",
-		ExpiresIn:    3600, // 1 hour
-		Scope:        authCode.Scope,
-		HTTPStatus:   200,
+		Success:     true,
+		IDToken:     idToken,
+		AccessToken: accessToken,
+		TokenType:   "Bearer",
+		ExpiresIn:   3600, // 1 hour
+		Scope:       authCode.Scope,
+		HTTPStatus:  200,
 	}
 }
 
@@ -625,6 +711,25 @@ func (s *OIDCService) GetUserInfo(ctx context.Context, accessToken string) (*Use
 			if userInfoMap, ok := extraMap["user_info"].(map[string]interface{}); ok {
 				if emailStr, ok := userInfoMap["email"].(string); ok {
 					userInfo.Email = &emailStr
+				}
+			}
+		}
+	}
+
+	// Add groups information if groups scope is granted
+	if containsScope(scope, "groups") {
+		if extraMap, ok := claims["extra_claims"].(map[string]interface{}); ok {
+			if groupsInterface, exists := extraMap["groups"]; exists {
+				if groupsSlice, ok := groupsInterface.([]interface{}); ok {
+					groups := make([]string, 0, len(groupsSlice))
+					for _, g := range groupsSlice {
+						if groupStr, ok := g.(string); ok {
+							groups = append(groups, groupStr)
+						}
+					}
+					if len(groups) > 0 {
+						userInfo.Groups = &groups
+					}
 				}
 			}
 		}

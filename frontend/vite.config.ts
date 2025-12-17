@@ -10,7 +10,7 @@ export default defineConfig({
     tailwindcss(),
   ],
   server: {
-    port: 3000,
+    port: 4040,
     proxy: {
       '/api/idm/auth': {
         target: 'http://localhost:4000',
@@ -28,10 +28,6 @@ export default defineConfig({
         },
       },
       '/api/': {
-        target: 'http://localhost:4000',
-        changeOrigin: true,
-      },
-      '/idm': {
         target: 'http://localhost:4000',
         changeOrigin: true,
       },

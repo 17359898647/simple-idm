@@ -6,7 +6,6 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
-	mapperdb "github.com/tendant/simple-idm/pkg/mapper/mapperdb"
 )
 
 // UserMapper interface combines user mapping and repository operations
@@ -22,62 +21,69 @@ type UserMapper interface {
 
 // DefaultUserMapper implements the UserMapper interface
 type DefaultUserMapper struct {
-	queries *mapperdb.Queries
+	repo MapperRepository
 }
 
-// NewUserMapper creates a new DefaultUserMapper with the given repository
-func NewDefaultUserMapper(queries *mapperdb.Queries) *DefaultUserMapper {
+// NewDefaultUserMapper creates a new DefaultUserMapper with the given repository
+func NewDefaultUserMapper(repo MapperRepository) *DefaultUserMapper {
 	return &DefaultUserMapper{
-		queries: queries,
+		repo: repo,
 	}
 }
 
-// GetUsers implements the original UserMapper method
+// FindUsersByLoginID implements the original UserMapper method
 func (m *DefaultUserMapper) FindUsersByLoginID(ctx context.Context, loginID uuid.UUID) ([]User, error) {
-	if m.queries == nil {
-		slog.Warn("DefaultUserRepository queries is nil")
+	if m.repo == nil {
+		slog.Warn("DefaultUserMapper repo is nil")
 		return nil, nil
 	}
 
-	users, err := m.queries.GetUsersByLoginId(ctx, uuid.NullUUID{UUID: loginID, Valid: true})
+	// Try to get users with groups first, fallback to without groups if needed
+	userEntities, err := m.repo.GetUsersByLoginID(ctx, loginID, true)
 	if err != nil {
-		return nil, fmt.Errorf("error getting users: %w", err)
+		// Fallback to query without groups
+		slog.Warn("Falling back to query without groups", "error", err)
+		userEntities, err = m.repo.GetUsersByLoginID(ctx, loginID, false)
+		if err != nil {
+			return nil, fmt.Errorf("error getting users: %w", err)
+		}
 	}
 
-	// Map users to MappedUser
-	mappedUsers := make([]User, 0, len(users))
-	for _, user := range users {
-		// Convert roles from interface{} to []string
-		roles, ok := user.Roles.([]interface{})
-		if !ok {
-			return nil, fmt.Errorf("invalid roles format")
-		}
-
-		strRoles := make([]string, 0, len(roles))
-		for _, r := range roles {
-			if str, ok := r.(string); ok {
-				strRoles = append(strRoles, str)
-			}
-		}
-
+	// Convert UserEntity to User
+	mappedUsers := make([]User, 0, len(userEntities))
+	for _, entity := range userEntities {
 		// Create custom claims
 		extraClaims := map[string]interface{}{
 			"username": "", // Placeholder for username
-			"roles":    strRoles,
+			"roles":    entity.Roles,
+			"groups":   entity.Groups,
+		}
+
+		phoneNumber := ""
+		if entity.PhoneValid {
+			phoneNumber = entity.Phone
+		}
+
+		displayName := ""
+		if entity.NameValid {
+			displayName = entity.Name
 		}
 
 		userInfo := UserInfo{
-			Email:       user.Email,
-			PhoneNumber: user.Phone.String,
+			Email: entity.Email,
+			// FIX-ME: need to add email verification flow in the future
+			EmailVerified: true,
+			PhoneNumber:   phoneNumber,
 		}
 
 		mappedUsers = append(mappedUsers, User{
-			UserId:      user.ID.String(),
+			UserId:      entity.ID.String(),
 			LoginID:     loginID.String(),
 			UserInfo:    userInfo,
-			DisplayName: user.Name.String,
+			DisplayName: displayName,
 			ExtraClaims: extraClaims,
-			Roles:       strRoles,
+			Roles:       entity.Roles,
+			Groups:      entity.Groups,
 		})
 	}
 
@@ -86,71 +92,77 @@ func (m *DefaultUserMapper) FindUsersByLoginID(ctx context.Context, loginID uuid
 
 // GetUserByUserID delegates to the repository
 func (m *DefaultUserMapper) GetUserByUserID(ctx context.Context, userID uuid.UUID) (User, error) {
-	if m.queries == nil {
-		slog.Warn("DefaultUserRepository queries is nil")
-		return User{}, fmt.Errorf("queries not initialized")
+	if m.repo == nil {
+		slog.Warn("DefaultUserMapper repo is nil")
+		return User{}, fmt.Errorf("repo not initialized")
 	}
 
-	user, err := m.queries.GetUserById(ctx, userID)
+	// Try to get user with groups first, fallback to without groups if needed
+	entity, err := m.repo.GetUserByUserID(ctx, userID, true)
 	if err != nil {
-		return User{}, fmt.Errorf("error getting user: %w", err)
-	}
-
-	// Convert roles from interface{} to []string
-	roles, ok := user.Roles.([]interface{})
-	if !ok {
-		return User{}, fmt.Errorf("invalid roles format")
-	}
-
-	strRoles := make([]string, 0, len(roles))
-	for _, r := range roles {
-		if str, ok := r.(string); ok {
-			strRoles = append(strRoles, str)
+		slog.Warn("Falling back to query without groups", "error", err)
+		// Fallback to query without groups
+		entity, err = m.repo.GetUserByUserID(ctx, userID, false)
+		if err != nil {
+			return User{}, fmt.Errorf("error getting user: %w", err)
 		}
 	}
 
 	// Create custom claims
 	extraClaims := map[string]interface{}{
 		"username": "", // Placeholder for username
-		"roles":    strRoles,
+		"roles":    entity.Roles,
+		"groups":   entity.Groups,
+	}
+
+	displayName := ""
+	if entity.NameValid {
+		displayName = entity.Name
+	}
+
+	phoneNumber := ""
+	if entity.PhoneValid {
+		phoneNumber = entity.Phone
+	}
+
+	loginID := ""
+	if entity.LoginIDValid {
+		loginID = entity.LoginID.String()
 	}
 
 	userInfo := UserInfo{
-		Email: user.Email,
+		Email: entity.Email,
+		// FIX-ME: need to add email verification flow in the future
+		EmailVerified: true,
+		PhoneNumber:   phoneNumber,
 	}
 
 	return User{
-		UserId:      user.ID.String(),
-		LoginID:     user.LoginID.UUID.String(),
-		DisplayName: user.Name.String,
+		UserId:      entity.ID.String(),
+		LoginID:     loginID,
+		DisplayName: displayName,
 		ExtraClaims: extraClaims,
 		UserInfo:    userInfo,
-		Roles:       strRoles,
+		Roles:       entity.Roles,
+		Groups:      entity.Groups,
 	}, nil
 }
 
 // FindUsernamesByEmail delegates to the repository
 func (m *DefaultUserMapper) FindUsernamesByEmail(ctx context.Context, email string) ([]string, error) {
-	if m.queries == nil {
-		slog.Warn("DefaultUserRepository queries is nil")
-		return nil, fmt.Errorf("queries not initialized")
+	if m.repo == nil {
+		slog.Warn("DefaultUserMapper repo is nil")
+		return nil, fmt.Errorf("repo not initialized")
 	}
 
-	usernames, err := m.queries.FindUsernamesByEmail(ctx, email)
+	usernames, err := m.repo.FindUsernamesByEmail(ctx, email)
 	if err != nil {
 		return nil, fmt.Errorf("error finding usernames: %w", err)
 	}
 
-	var res []string
-	for _, username := range usernames {
-		if username.Valid {
-			res = append(res, username.String)
-		}
-	}
+	slog.Info("Found usernames by email", "usernames", usernames)
 
-	slog.Info("Found usernames by email", "usernames", res)
-
-	return res, nil
+	return usernames, nil
 }
 
 // ToTokenClaims converts a User to rootModifications and extraClaims maps for token generation
@@ -164,6 +176,7 @@ func (m *DefaultUserMapper) ToTokenClaims(user User) (rootModifications map[stri
 		"login_id":     user.LoginID,
 		"display_name": user.DisplayName,
 		"roles":        user.Roles,
+		"groups":       user.Groups,
 		"user_info":    user.UserInfo,
 	}
 

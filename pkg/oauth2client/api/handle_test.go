@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/go-chi/render"
 	"github.com/tendant/simple-idm/pkg/oauth2client"
 )
 
@@ -24,11 +26,12 @@ func TestRegisterClient(t *testing.T) {
 		{
 			name: "Valid client registration",
 			requestBody: ClientRegistrationRequest{
+				ClientID:      "test-client-1",
 				ClientName:    "Test Client",
 				RedirectUris:  []string{"https://example.com/callback"},
-				ClientType:    &ClientRegistrationRequestClientTypeConfidential,
-				GrantTypes:    []ClientRegistrationRequestGrantTypes{ClientRegistrationRequestGrantTypesAuthorizationCode},
-				ResponseTypes: []ClientRegistrationRequestResponseTypes{ClientRegistrationRequestResponseTypesCode},
+				ClientType:    stringPtr("confidential"),
+				GrantTypes:    []string{"authorization_code"},
+				ResponseTypes: []string{"code"},
 				Scope:         stringPtr("openid profile email"),
 			},
 			expectedStatus: 201,
@@ -36,6 +39,7 @@ func TestRegisterClient(t *testing.T) {
 		{
 			name: "Missing client name",
 			requestBody: ClientRegistrationRequest{
+				ClientID:     "test-client-2",
 				RedirectUris: []string{"https://example.com/callback"},
 			},
 			expectedStatus: 400,
@@ -44,6 +48,7 @@ func TestRegisterClient(t *testing.T) {
 		{
 			name: "Missing redirect URIs",
 			requestBody: ClientRegistrationRequest{
+				ClientID:   "test-client-3",
 				ClientName: "Test Client",
 			},
 			expectedStatus: 400,
@@ -52,6 +57,7 @@ func TestRegisterClient(t *testing.T) {
 		{
 			name: "Invalid redirect URI scheme",
 			requestBody: ClientRegistrationRequest{
+				ClientID:     "test-client-4",
 				ClientName:   "Test Client",
 				RedirectUris: []string{"ftp://example.com/callback"},
 			},
@@ -61,6 +67,7 @@ func TestRegisterClient(t *testing.T) {
 		{
 			name: "HTTP redirect URI for non-localhost",
 			requestBody: ClientRegistrationRequest{
+				ClientID:     "test-client-5",
 				ClientName:   "Test Client",
 				RedirectUris: []string{"http://example.com/callback"},
 			},
@@ -70,6 +77,7 @@ func TestRegisterClient(t *testing.T) {
 		{
 			name: "Valid HTTP redirect URI for localhost",
 			requestBody: ClientRegistrationRequest{
+				ClientID:     "test-client-6",
 				ClientName:   "Test Client",
 				RedirectUris: []string{"http://localhost:3000/callback"},
 			},
@@ -78,6 +86,7 @@ func TestRegisterClient(t *testing.T) {
 		{
 			name: "Invalid scope",
 			requestBody: ClientRegistrationRequest{
+				ClientID:     "test-client-7",
 				ClientName:   "Test Client",
 				RedirectUris: []string{"https://example.com/callback"},
 				Scope:        stringPtr("invalid_scope"),
@@ -86,25 +95,14 @@ func TestRegisterClient(t *testing.T) {
 			expectedError:  "invalid_scope",
 		},
 		{
-			name: "Public client with correct auth method",
+			name: "Public client",
 			requestBody: ClientRegistrationRequest{
-				ClientName:              "Public Client",
-				RedirectUris:            []string{"https://example.com/callback"},
-				ClientType:              &ClientRegistrationRequestClientTypePublic,
-				TokenEndpointAuthMethod: &ClientRegistrationRequestTokenEndpointAuthMethodNone,
+				ClientID:     "test-client-8",
+				ClientName:   "Public Client",
+				RedirectUris: []string{"https://example.com/callback"},
+				ClientType:   stringPtr("public"),
 			},
 			expectedStatus: 201,
-		},
-		{
-			name: "Public client with incorrect auth method",
-			requestBody: ClientRegistrationRequest{
-				ClientName:              "Public Client",
-				RedirectUris:            []string{"https://example.com/callback"},
-				ClientType:              &ClientRegistrationRequestClientTypePublic,
-				TokenEndpointAuthMethod: &ClientRegistrationRequestTokenEndpointAuthMethodClientSecretBasic,
-			},
-			expectedStatus: 400,
-			expectedError:  "invalid_client_metadata",
 		},
 	}
 
@@ -124,12 +122,10 @@ func TestRegisterClient(t *testing.T) {
 			// Call handler
 			response := handle.RegisterClient(w, req)
 
-			// Render the response to the writer
+			// Render the response to the writer using the chi render package
 			if response != nil {
-				if response.body != nil {
-					response.Render(w, req)
-				} else {
-					w.WriteHeader(response.Code)
+				if err := render.Render(w, req, response); err != nil {
+					t.Fatalf("Failed to render response: %v", err)
 				}
 			}
 
@@ -228,7 +224,7 @@ func TestListClients(t *testing.T) {
 		{
 			name: "Filter by client type",
 			params: ListClientsParams{
-				ClientType: (*ListClientsParamsClientType)(stringPtr("confidential")),
+				ClientType: stringPtr("confidential"),
 			},
 			expectedCount: 1,
 			expectedTotal: 1,
@@ -242,12 +238,10 @@ func TestListClients(t *testing.T) {
 
 			response := handle.ListClients(w, req, tt.params)
 
-			// Render the response to the writer
+			// Render the response to the writer using the chi render package
 			if response != nil {
-				if response.body != nil {
-					response.Render(w, req)
-				} else {
-					w.WriteHeader(response.Code)
+				if err := render.Render(w, req, response); err != nil {
+					t.Fatalf("Failed to render response: %v", err)
 				}
 			}
 
@@ -314,12 +308,10 @@ func TestGetClient(t *testing.T) {
 
 			response := handle.GetClient(w, req, tt.clientID)
 
-			// Render the response to the writer
+			// Render the response to the writer using the chi render package
 			if response != nil {
-				if response.body != nil {
-					response.Render(w, req)
-				} else {
-					w.WriteHeader(response.Code)
+				if err := render.Render(w, req, response); err != nil {
+					t.Fatalf("Failed to render response: %v", err)
 				}
 			}
 
@@ -408,12 +400,10 @@ func TestUpdateClient(t *testing.T) {
 
 			response := handle.UpdateClient(w, req, tt.clientID)
 
-			// Render the response to the writer
+			// Render the response to the writer using the chi render package
 			if response != nil {
-				if response.body != nil {
-					response.Render(w, req)
-				} else {
-					w.WriteHeader(response.Code)
+				if err := render.Render(w, req, response); err != nil {
+					t.Fatalf("Failed to render response: %v", err)
 				}
 			}
 
@@ -477,12 +467,10 @@ func TestDeleteClient(t *testing.T) {
 
 			response := handle.DeleteClient(w, req, tt.clientID)
 
-			// Render the response to the writer
+			// Render the response to the writer using the chi render package
 			if response != nil {
-				if response.body != nil {
-					response.Render(w, req)
-				} else {
-					w.WriteHeader(response.Code)
+				if err := render.Render(w, req, response); err != nil {
+					t.Fatalf("Failed to render response: %v", err)
 				}
 			}
 
@@ -536,12 +524,10 @@ func TestRegenerateClientSecret(t *testing.T) {
 
 			response := handle.RegenerateClientSecret(w, req, tt.clientID)
 
-			// Render the response to the writer
+			// Render the response to the writer using the chi render package
 			if response != nil {
-				if response.body != nil {
-					response.Render(w, req)
-				} else {
-					w.WriteHeader(response.Code)
+				if err := render.Render(w, req, response); err != nil {
+					t.Fatalf("Failed to render response: %v", err)
 				}
 			}
 
@@ -562,6 +548,13 @@ func TestRegenerateClientSecret(t *testing.T) {
 				}
 				if secretResp.ClientSecret == "test-secret" {
 					t.Error("Expected new client_secret to be different from old one")
+				}
+				if secretResp.UpdatedAt.IsZero() {
+					t.Error("Expected updated_at to be set")
+				}
+				// Check that updated_at is recent (within last minute)
+				if time.Since(secretResp.UpdatedAt) > time.Minute {
+					t.Error("Expected updated_at to be recent")
 				}
 			}
 		})

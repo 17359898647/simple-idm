@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rsa"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,16 +14,18 @@ import (
 	"github.com/go-chi/jwtauth/v5"
 	"github.com/go-chi/render"
 	"github.com/ilyakaznacheev/cleanenv"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/tendant/chi-demo/app"
-	dbutils "github.com/tendant/db-utils/db"
 	"github.com/tendant/simple-idm/pkg/client"
+	pkgconfig "github.com/tendant/simple-idm/pkg/config"
+	"github.com/tendant/simple-idm/pkg/emailverification"
+	emailverificationapi "github.com/tendant/simple-idm/pkg/emailverification/api"
 	"github.com/tendant/simple-idm/pkg/externalprovider"
 	externalProviderAPI "github.com/tendant/simple-idm/pkg/externalprovider/api"
 	"github.com/tendant/simple-idm/pkg/iam"
 	iamapi "github.com/tendant/simple-idm/pkg/iam/api"
 	"github.com/tendant/simple-idm/pkg/iam/iamdb"
-	"github.com/tendant/simple-idm/pkg/jwks"
 	"github.com/tendant/simple-idm/pkg/oauth2client"
 	oauth2clientapi "github.com/tendant/simple-idm/pkg/oauth2client/api"
 	"github.com/tendant/simple-idm/pkg/oidc"
@@ -39,19 +43,22 @@ import (
 	"github.com/tendant/simple-idm/pkg/loginflow"
 
 	// loginapi "github.com/tendant/simple-idm/pkg/login/api"
+	"github.com/tendant/simple-idm/pkg/jwks"
 	"github.com/tendant/simple-idm/pkg/login/loginapi"
 	"github.com/tendant/simple-idm/pkg/login/logindb"
 	"github.com/tendant/simple-idm/pkg/logins"
 	"github.com/tendant/simple-idm/pkg/logins/loginsdb"
 	"github.com/tendant/simple-idm/pkg/mapper"
 	"github.com/tendant/simple-idm/pkg/mapper/mapperdb"
-	"github.com/tendant/simple-idm/pkg/notice"
 	"github.com/tendant/simple-idm/pkg/notification"
 	"github.com/tendant/simple-idm/pkg/profile"
 	profileapi "github.com/tendant/simple-idm/pkg/profile/api"
 	"github.com/tendant/simple-idm/pkg/profile/profiledb"
+	"github.com/tendant/simple-idm/pkg/ratelimit"
 	"github.com/tendant/simple-idm/pkg/role"
 	roleapi "github.com/tendant/simple-idm/pkg/role/api"
+	"github.com/tendant/simple-idm/pkg/sessions"
+	sessionsapi "github.com/tendant/simple-idm/pkg/sessions/api"
 	"github.com/tendant/simple-idm/pkg/role/roledb"
 	"github.com/tendant/simple-idm/pkg/tokengenerator"
 	"github.com/tendant/simple-idm/pkg/twofa"
@@ -65,16 +72,12 @@ type IdmDbConfig struct {
 	Database string `env:"IDM_PG_DATABASE" env-default:"idm_db"`
 	User     string `env:"IDM_PG_USER" env-default:"idm"`
 	Password string `env:"IDM_PG_PASSWORD" env-default:"pwd"`
+	Schema   string `env:"IDM_PG_SCHEMA" env-default:"public"`
 }
 
-func (d IdmDbConfig) toDbConfig() dbutils.DbConfig {
-	return dbutils.DbConfig{
-		Host:     d.Host,
-		Port:     d.Port,
-		Database: d.Database,
-		User:     d.User,
-		Password: d.Password,
-	}
+func (d IdmDbConfig) toDatabaseURL() string {
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable&search_path=%s,public",
+		d.User, d.Password, d.Host, d.Port, d.Database, d.Schema)
 }
 
 type JwtConfig struct {
@@ -106,18 +109,9 @@ type TwilioConfig struct {
 	TwilioFrom       string `env:"TWILIO_FROM"`
 }
 
-type PasswordComplexityConfig struct {
-	RequiredDigit           bool   `env:"PASSWORD_COMPLEXITY_REQUIRE_DIGIT" env-default:"true"`
-	RequiredLowercase       bool   `env:"PASSWORD_COMPLEXITY_REQUIRE_LOWERCASE" env-default:"true"`
-	RequiredNonAlphanumeric bool   `env:"PASSWORD_COMPLEXITY_REQUIRE_NON_ALPHANUMERIC" env-default:"true"`
-	RequiredUppercase       bool   `env:"PASSWORD_COMPLEXITY_REQUIRE_UPPERCASE" env-default:"true"`
-	RequiredLength          int    `env:"PASSWORD_COMPLEXITY_REQUIRED_LENGTH" env-default:"8"`
-	DisallowCommonPwds      bool   `env:"PASSWORD_COMPLEXITY_DISALLOW_COMMON_PWDS" env-default:"true"`
-	MaxRepeatedChars        int    `env:"PASSWORD_COMPLEXITY_MAX_REPEATED_CHARS" env-default:"3"`
-	HistoryCheckCount       int    `env:"PASSWORD_COMPLEXITY_HISTORY_CHECK_COUNT" env-default:"0"`
-	ExpirationPeriod        string `env:"PASSWORD_COMPLEXITY_EXPIRATION_PERIOD" env-default:"P100Y"`      // 100 years
-	MinPasswordAgePeriod    string `env:"PASSWORD_COMPLEXITY_MIN_PASSWORD_AGE_PERIOD" env-default:"PT0M"` // 0 minutes
-}
+// PasswordComplexityConfig is now defined in pkg/config package
+// Keeping this type alias for backward compatibility
+type PasswordComplexityConfig = pkgconfig.PasswordComplexityConfig
 
 type LoginConfig struct {
 	MaxFailedAttempts        int    `env:"LOGIN_MAX_FAILED_ATTEMPTS" env-default:"10000"`
@@ -127,6 +121,22 @@ type LoginConfig struct {
 	RegistrationDefaultRole  string `env:"LOGIN_REGISTRATION_DEFAULT_ROLE" env-default:"readonlyuser"`
 	MagicLinkTokenExpiration string `env:"MAGIC_LINK_TOKEN_EXPIRATION" env-default:"PT6H"`
 	PhoneVerificationSecret  string `env:"PHONE_VERIFICATION_SECRET" env-default:"secret"`
+}
+
+type OAuth2ClientConfig struct {
+	// OAuth2 Client Secret Encryption Key (32 bytes base64 encoded)
+	EncryptionKey string `env:"OAUTH2_CLIENT_ENCRYPTION_KEY"`
+}
+
+type JWKSConfig struct {
+	// Key ID for the JWKS key
+	KeyID string `env:"JWKS_KEY_ID" env-default:""`
+
+	// Algorithm (typically RS256)
+	Algorithm string `env:"JWKS_ALGORITHM" env-default:"RS256"`
+
+	// Path to RSA Private Key PEM file
+	PrivateKeyFile string `env:"JWKS_PRIVATE_KEY_FILE" env-default:"jwt-private.pem"`
 }
 
 type ExternalProviderConfig struct {
@@ -154,8 +164,53 @@ type ExternalProviderConfig struct {
 	DefaultRole string `env:"EXTERNAL_PROVIDER_DEFAULT_ROLE" env-default:"user"`
 }
 
+type RateLimitConfig struct {
+	// Global rate limiting
+	GlobalEnabled    bool    `env:"RATELIMIT_GLOBAL_ENABLED" env-default:"true"`
+	GlobalCapacity   int     `env:"RATELIMIT_GLOBAL_CAPACITY" env-default:"1000"`
+	GlobalRefillRate float64 `env:"RATELIMIT_GLOBAL_REFILL_RATE" env-default:"16.67"` // ~1000 per minute
+
+	// Per-IP rate limiting
+	PerIPEnabled    bool    `env:"RATELIMIT_PER_IP_ENABLED" env-default:"true"`
+	PerIPCapacity   int     `env:"RATELIMIT_PER_IP_CAPACITY" env-default:"100"`
+	PerIPRefillRate float64 `env:"RATELIMIT_PER_IP_REFILL_RATE" env-default:"1.67"` // ~100 per minute
+
+	// Per-User rate limiting (for authenticated requests)
+	PerUserEnabled    bool    `env:"RATELIMIT_PER_USER_ENABLED" env-default:"true"`
+	PerUserCapacity   int     `env:"RATELIMIT_PER_USER_CAPACITY" env-default:"200"`
+	PerUserRefillRate float64 `env:"RATELIMIT_PER_USER_REFILL_RATE" env-default:"3.33"` // ~200 per minute
+
+	// Login endpoint specific limits (to prevent brute force)
+	LoginEnabled    bool    `env:"RATELIMIT_LOGIN_ENABLED" env-default:"true"`
+	LoginCapacity   int     `env:"RATELIMIT_LOGIN_CAPACITY" env-default:"10"`
+	LoginRefillRate float64 `env:"RATELIMIT_LOGIN_REFILL_RATE" env-default:"0.167"` // 10 per minute
+
+	// Signup endpoint specific limits
+	SignupEnabled    bool    `env:"RATELIMIT_SIGNUP_ENABLED" env-default:"true"`
+	SignupCapacity   int     `env:"RATELIMIT_SIGNUP_CAPACITY" env-default:"5"`
+	SignupRefillRate float64 `env:"RATELIMIT_SIGNUP_REFILL_RATE" env-default:"0.017"` // 5 per 5 minutes
+
+	// Password reset endpoint specific limits
+	PasswordResetEnabled    bool    `env:"RATELIMIT_PASSWORD_RESET_ENABLED" env-default:"true"`
+	PasswordResetCapacity   int     `env:"RATELIMIT_PASSWORD_RESET_CAPACITY" env-default:"3"`
+	PasswordResetRefillRate float64 `env:"RATELIMIT_PASSWORD_RESET_REFILL_RATE" env-default:"0.00083"` // 3 per hour
+
+	// Include rate limit headers in response
+	IncludeHeaders bool `env:"RATELIMIT_INCLUDE_HEADERS" env-default:"true"`
+}
+
+type SessionManagementConfig struct {
+	// Enable session tracking and management
+	Enabled bool `env:"SESSION_MANAGEMENT_ENABLED" env-default:"false"`
+
+	// API endpoint prefix for session management routes
+	// Will be automatically set based on prefix configuration if not specified
+	APIPrefix string `env:"SESSION_MANAGEMENT_API_PREFIX" env-default:""`
+}
+
 type Config struct {
 	BaseUrl                  string `env:"BASE_URL" env-default:"http://localhost:4000"`
+	FrontendUrl              string `env:"FRONTEND_URL" env-default:"http://localhost:3000"`
 	IdmDbConfig              IdmDbConfig
 	AppConfig                app.AppConfig
 	JwtConfig                JwtConfig
@@ -163,7 +218,11 @@ type Config struct {
 	PasswordComplexityConfig PasswordComplexityConfig
 	LoginConfig              LoginConfig
 	TwilioConfig             TwilioConfig
+	OAuth2ClientConfig       OAuth2ClientConfig
+	JWKSConfig               JWKSConfig
 	ExternalProviderConfig   ExternalProviderConfig
+	RateLimitConfig          RateLimitConfig
+	SessionManagementConfig  SessionManagementConfig
 }
 
 // loadEnvFile loads environment variables from .env file if it exists
@@ -207,6 +266,59 @@ func loadEnvFile() {
 	slog.Info("Configuration loaded from .env file successfully")
 }
 
+// loadPrivateKeyFromConfig loads and decodes a private key from the JWKS configuration
+func loadPrivateKeyFromConfig(config JWKSConfig) (*rsa.PrivateKey, error) {
+	if config.PrivateKeyFile == "" {
+		return nil, fmt.Errorf("no private key file specified in JWKS_PRIVATE_KEY_FILE")
+	}
+
+	keyFilePath := config.PrivateKeyFile
+
+	// If the path is not absolute, try to resolve it
+	if !filepath.IsAbs(keyFilePath) {
+		// First try current working directory
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current working directory: %w", err)
+		}
+
+		cwdKeyPath := filepath.Join(cwd, keyFilePath)
+		if _, err := os.Stat(cwdKeyPath); err == nil {
+			keyFilePath = cwdKeyPath
+		} else {
+			// Fallback to executable directory
+			execPath, err := os.Executable()
+			if err == nil {
+				execDir := filepath.Dir(execPath)
+				execKeyPath := filepath.Join(execDir, keyFilePath)
+				if _, err := os.Stat(execKeyPath); err == nil {
+					keyFilePath = execKeyPath
+				} else {
+					// Use the current working directory path as final attempt
+					keyFilePath = cwdKeyPath
+				}
+			} else {
+				// Use the current working directory path as final attempt
+				keyFilePath = cwdKeyPath
+			}
+		}
+	}
+
+	slog.Info("Loading private key from file", "path", keyFilePath)
+	keyBytes, err := os.ReadFile(keyFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read private key file %s: %w", keyFilePath, err)
+	}
+
+	privateKeyPEM := string(keyBytes)
+	privateKey, err := jwks.DecodePrivateKeyFromPEM(privateKeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode private key: %w", err)
+	}
+
+	return privateKey, nil
+}
+
 func main() {
 
 	// Create a logger with source enabled
@@ -223,15 +335,31 @@ func main() {
 	config := Config{}
 	cleanenv.ReadEnv(&config)
 
+	// Load API endpoint prefix configuration
+	prefixConfig := pkgconfig.LoadPrefixConfig()
+	if err := prefixConfig.Validate(); err != nil {
+		slog.Error("Invalid prefix configuration", "error", err)
+		os.Exit(-1)
+	}
+	slog.Info("API endpoint prefixes configured", "auth", prefixConfig.Auth, "signup", prefixConfig.Signup,
+		"profile", prefixConfig.Profile, "2fa", prefixConfig.TwoFA, "email", prefixConfig.Email)
+
 	server := app.DefaultApp()
 
-	app.RoutesHealthz(server.R)
-	app.RoutesHealthzReady(server.R)
+	app.RegisterHealthzRoutes(server.R)
 
-	dbConfig := config.IdmDbConfig.toDbConfig()
-	pool, err := dbutils.NewDbPool(context.Background(), dbConfig)
+	// Configure and add rate limiting middleware
+	rateLimitMiddleware := createRateLimitMiddleware(&config, prefixConfig)
+	server.R.Use(rateLimitMiddleware.Handler)
+	slog.Info("Rate limiting configured",
+		"global", config.RateLimitConfig.GlobalEnabled,
+		"per_ip", config.RateLimitConfig.PerIPEnabled,
+		"per_user", config.RateLimitConfig.PerUserEnabled)
+
+	dbURL := config.IdmDbConfig.toDatabaseURL()
+	pool, err := pgxpool.New(context.Background(), dbURL)
 	if err != nil {
-		slog.Error("Failed creating dbpool", "db", dbConfig.Database, "host", dbConfig.Host, "port", dbConfig.Port, "user", dbConfig.User)
+		slog.Error("Failed creating dbpool", "db", config.IdmDbConfig.Database, "host", config.IdmDbConfig.Host, "port", config.IdmDbConfig.Port, "user", config.IdmDbConfig.User, "schema", config.IdmDbConfig.Schema)
 		os.Exit(-1)
 	}
 
@@ -240,12 +368,14 @@ func main() {
 	iamQueries := iamdb.New(pool)
 	loginQueries := logindb.New(pool)
 	twofaQueries := twofadb.New(pool)
+	twofaRepo := twofa.NewPostgresTwoFARepository(twofaQueries)
 	mapperQueries := mapperdb.New(pool)
+	mapperRepo := mapper.NewPostgresMapperRepository(mapperQueries)
 
 	// Initialize NotificationManager and register email notifier
-	notificationManager, err := notice.NewNotificationManager(
-		config.BaseUrl,
-		notice.WithSMTP(notification.SMTPConfig{
+	notificationManager, err := notification.NewNotificationManagerWithOptions(
+		config.FrontendUrl,
+		notification.WithSMTP(notification.SMTPConfig{
 			Host:     config.EmailConfig.Host,
 			Port:     int(config.EmailConfig.Port),
 			Username: config.EmailConfig.Username,
@@ -253,18 +383,18 @@ func main() {
 			From:     config.EmailConfig.From,
 			TLS:      config.EmailConfig.TLS,
 		}),
-		notice.WithTwilio(notification.TwilioConfig{
+		notification.WithTwilio(notification.TwilioConfig{
 			TwilioAccountSid: config.TwilioConfig.TwilioAccountSid,
 			TwilioAuthToken:  config.TwilioConfig.TwilioAuthToken,
 			TwilioFrom:       config.TwilioConfig.TwilioFrom,
 		}),
-		notice.WithDefaultTemplates(),
+		notification.WithDefaultTemplates(),
 	)
 	if err != nil {
 		slog.Error("Failed initialize notification manager", "err", err)
 	}
 
-	userMapper := mapper.NewDefaultUserMapper(mapperQueries)
+	userMapper := mapper.NewDefaultUserMapper(mapperRepo)
 	delegatedUserMapper := &mapper.DefaultDelegatedUserMapper{}
 
 	// Create a password policy based on the environment
@@ -312,12 +442,20 @@ func main() {
 	// 	"simple-idm", // Audience
 	// )
 
-	// Initialize JWKS service for RSA key management with in-memory storage
-	jwksService, err := jwks.NewJWKSServiceWithInMemoryStorage()
+	// Initialize JWKS service with configured key from environment
+
+	// Load private key using helper method
+	privateKey, err := loadPrivateKeyFromConfig(config.JWKSConfig)
 	if err != nil {
-		slog.Error("Failed to initialize JWKS service", "error", err)
+		slog.Error("Failed to load private key", "error", err)
 		os.Exit(-1)
 	}
+
+	jwksService, err := jwks.NewJWKSServiceWithKey(&jwks.KeyPair{
+		Kid:        config.JWKSConfig.KeyID,
+		Alg:        config.JWKSConfig.Algorithm,
+		PrivateKey: privateKey,
+	})
 
 	// Get the active signing key for RSA token generation
 	activeKey, err := jwksService.GetActiveSigningKey()
@@ -381,10 +519,10 @@ func main() {
 		ExpiryDuration: deviceExpiryDuration,
 	}
 	deviceRepository := device.NewPostgresDeviceRepositoryWithOptions(pool, deviceRepositoryOptions)
-	deviceService := device.NewDeviceService(deviceRepository, loginRepository)
+	deviceService := device.NewDeviceService(deviceRepository)
 
 	twoFaService := twofa.NewTwoFaService(
-		twofaQueries,
+		twofaRepo,
 		twofa.WithNotificationManager(notificationManager),
 		twofa.WithUserMapper(userMapper),
 	)
@@ -398,8 +536,7 @@ func main() {
 	)
 
 	// Initialize IAM repository and service
-	iamRepo := iam.NewPostgresIamRepository(iamQueries)
-	iamService := iam.NewIamService(iamRepo)
+	iamService := iam.NewIamServiceWithQueriesAndGroups(iamQueries)
 	userHandle := iamapi.NewHandle(iamService)
 
 	// Initialize role repository and service
@@ -409,13 +546,14 @@ func main() {
 
 	// Initialize logins management service and routes
 	loginsQueries := loginsdb.New(pool)
+	loginsRepo := logins.NewPostgresLoginsRepository(loginsQueries)
 	loginsServiceOptions := &logins.LoginsServiceOptions{
 		PasswordManager: passwordManager,
 	}
-	loginsService := logins.NewLoginsService(loginsQueries, loginQueries, loginsServiceOptions) // Pass nil for default options
+	loginsService := logins.NewLoginsService(loginsRepo, loginQueries, loginsServiceOptions) // Pass nil for default options
 	loginsHandle := logins.NewHandle(loginsService, *twoFaService)
 
-	userService := user.NewUserService(iamService, loginsService, iamQueries)
+	userService := user.NewUserService(iamService, loginsService)
 
 	if exists, err := iamService.AnyUserExists(context.Background()); err != nil {
 		slog.Error("Error checking user existence", "error", err)
@@ -433,20 +571,40 @@ func main() {
 		}
 	}
 
-	signupHandle := signup.NewHandle(
+	// Initialize email verification service
+	emailVerificationRepo := emailverification.NewRepository(pool)
+	emailVerificationService := emailverification.NewEmailVerificationService(
+		emailVerificationRepo,
+		notificationManager,
+		config.BaseUrl,
+		emailverification.WithTokenExpiry(24*time.Hour),
+		emailverification.WithResendLimit(3),
+		emailverification.WithResendWindow(1*time.Hour),
+	)
+
+	signupHandle := signup.NewHandleWithOptions(
 		signup.WithIamService(*iamService),
 		signup.WithRoleService(*roleService),
 		signup.WithLoginsService(*loginsService),
 		signup.WithRegistrationEnabled(config.LoginConfig.RegistrationEnabled),
 		signup.WithDefaultRole(config.LoginConfig.RegistrationDefaultRole),
 		signup.WithLoginService(*loginService),
+		signup.WithEmailVerificationService(emailVerificationService),
 	)
 
 	// Initialize OAuth2 client service and OIDC handler
-	clientService := oauth2client.NewClientService(oauth2client.NewInMemoryOAuth2ClientRepository())
+	var clientService *oauth2client.ClientService
+	// Use PostgreSQL repository with encryption
+	postgresRepo, err := oauth2client.NewPostgresOAuth2ClientRepository(pool, config.OAuth2ClientConfig.EncryptionKey)
+	if err != nil {
+		slog.Error("Failed to create PostgreSQL OAuth2 client repository", "error", err)
+		os.Exit(-1)
+	}
+	clientService = oauth2client.NewClientService(postgresRepo)
+	slog.Info("Using PostgreSQL OAuth2 client repository with encryption")
 
 	// Setup default OAuth2 clients through the service layer
-	setupDefaultOAuth2Clients(clientService)
+	// setupDefaultOAuth2Clients(clientService)
 
 	// Create OIDC repository and service with RSA token generator
 	oidcRepository := oidc.NewInMemoryOIDCRepository()
@@ -455,7 +613,9 @@ func main() {
 		clientService,
 		oidc.WithTokenGenerator(rsaTokenGenerator),
 		oidc.WithBaseURL(config.BaseUrl),
-		oidc.WithLoginURL("http://localhost:3000/login"),
+		oidc.WithLoginURL(config.FrontendUrl+"/login"),
+		oidc.WithUserMapper(userMapper),
+		oidc.WithIssuer(config.JwtConfig.Issuer), // Use configured issuer
 	)
 
 	oidcHandle := oidcapi.NewOidcHandle(clientService, oidcService, oidcapi.WithJwksService(jwksService))
@@ -494,14 +654,14 @@ func main() {
 		loginService,
 		tokenService,
 		tokenCookieService,
-	).WithFrontendURL("http://localhost:3000")
+	).WithFrontendURL(config.FrontendUrl)
 
 	// Configure well-known endpoints for MCP compliance
 	wellKnownConfig := wellknown.Config{
 		ResourceURI:            config.BaseUrl,
 		AuthorizationServerURI: config.BaseUrl,
 		BaseURL:                config.BaseUrl,
-		Scopes:                 []string{"openid", "profile", "email"},
+		Scopes:                 []string{"openid", "profile", "email", "groups"},
 		ResourceDocumentation:  config.BaseUrl + "/docs",
 	}
 	wellKnownHandler := wellknown.NewHandler(wellKnownConfig)
@@ -511,22 +671,52 @@ func main() {
 	server.R.Get("/.well-known/oauth-authorization-server", wellKnownHandler.AuthorizationServerMetadata)
 	server.R.Get("/.well-known/openid-configuration", wellKnownHandler.OpenIDConfiguration)
 
+	// Initialize email verification API handler
+	emailVerificationHandle := emailverificationapi.NewHandler(emailVerificationService)
+
 	slog.Info("Registration enabled", "enabled", config.LoginConfig.RegistrationEnabled)
 	slog.Info("MCP Well-known endpoints configured", "base_url", config.BaseUrl)
-	server.R.Mount("/api/idm/auth", loginapi.Handler(loginHandle))
-	server.R.Mount("/api/idm/signup", signup.Handler(signupHandle))
+	server.R.Mount(prefixConfig.Auth, loginapi.Handler(loginHandle))
+	server.R.Mount(prefixConfig.Signup, signup.Handler(signupHandle))
 
 	// Mount OIDC endpoints (public, no authentication required)
-	server.R.Mount("/api/idm/oauth2", oidcapi.Handler(oidcHandle))
+	server.R.Mount(prefixConfig.OAuth2, oidcapi.Handler(oidcHandle))
 
 	// Mount external provider endpoints (public, no authentication required)
-	server.R.Mount("/api/idm/external", externalProviderAPI.Handler(externalProviderHandle))
+	server.R.Mount(prefixConfig.External, externalProviderAPI.Handler(externalProviderHandle))
 
-	tokenAuth := jwtauth.New("RS256", activeKey.PrivateKey, nil)
+	// Create both RSA and HMAC verifiers for multi-algorithm support
+	rsaAuth := jwtauth.New("RS256", activeKey.PrivateKey, activeKey.PublicKey)
+	hmacAuth := jwtauth.New("HS256", []byte(config.JwtConfig.JwtSecret), nil)
+
+	// Mount email verification endpoints (verify is public, resend and status require auth)
+	server.R.Route(prefixConfig.Email, func(r chi.Router) {
+		// Public endpoint for email verification
+		r.Post("/verify", emailVerificationHandle.VerifyEmail)
+
+		// Protected endpoints requiring authentication
+		r.Group(func(r chi.Router) {
+			r.Use(jwtauth.Verifier(rsaAuth))
+			r.Use(jwtauth.Authenticator(rsaAuth))
+			r.Post("/resend", emailVerificationHandle.ResendVerification)
+			r.Get("/status", emailVerificationHandle.GetVerificationStatus)
+		})
+	})
 
 	server.R.Group(func(r chi.Router) {
-		r.Use(client.Verifier(tokenAuth))
-		r.Use(jwtauth.Authenticator(tokenAuth))
+		r.Use(client.MultiAlgorithmVerifier(
+			client.VerifierConfig{
+				Name:   "RSA256-Primary",
+				Auth:   rsaAuth,
+				Active: true,
+			},
+			client.VerifierConfig{
+				Name:   "HMAC256-Fallback",
+				Auth:   hmacAuth,
+				Active: false,
+			},
+		))
+		r.Use(jwtauth.Authenticator(rsaAuth)) // Keep existing authenticator for RSA
 		r.Use(client.AuthUserMiddleware)
 		r.Get("/me", func(w http.ResponseWriter, r *http.Request) {
 			authUser, ok := r.Context().Value(client.AuthUserKey).(*client.AuthUser)
@@ -549,6 +739,10 @@ func main() {
 			render.PlainText(w, r, http.StatusText(http.StatusOK))
 		})
 
+		// Authenticated email verification endpoints (duplicate handlers removed - use email route above)
+		// r.Post("/api/idm/email/resend", emailVerificationHandle.ResendVerification)
+		// r.Get("/api/idm/email/status", emailVerificationHandle.GetVerificationStatus)
+
 		profileQueries := profiledb.New(pool)
 		profileRepo := profile.NewPostgresProfileRepository(profileQueries)
 		profileService := profile.NewProfileServiceWithOptions(
@@ -559,11 +753,11 @@ func main() {
 		)
 		responseHandler := profileapi.NewDefaultResponseHandler()
 		profileHandle := profileapi.NewHandle(profileService, twoFaService, tokenService, tokenCookieService, loginService, deviceService, responseHandler, config.LoginConfig.PhoneVerificationSecret)
-		r.Mount("/api/idm/profile", profileapi.Handler(profileHandle))
+		r.Mount(prefixConfig.Profile, profileapi.Handler(profileHandle))
 
 		// r.Mount("/auth", authpkg.Handler(authHandle))
 
-		r.Mount("/idm/users", iamapi.SecureHandler(userHandle))
+		r.Mount(prefixConfig.Users, iamapi.SecureHandler(userHandle))
 
 		// Create a secure handler for roles that uses the IAM admin middleware
 		roleRouter := chi.NewRouter()
@@ -571,21 +765,45 @@ func main() {
 			r.Use(client.AdminRoleMiddleware)
 			r.Mount("/", roleapi.Handler(roleHandle))
 		})
-		r.Mount("/idm/roles", roleRouter)
+		r.Mount(prefixConfig.Roles, roleRouter)
 
 		// Initialize two factor authentication service and routes
 		twoFaHandle := twofaapi.NewHandle(twoFaService, tokenService, tokenCookieService, userMapper)
-		r.Mount("/idm/2fa", twofaapi.TwoFaHandler(twoFaHandle))
+		r.Mount(prefixConfig.TwoFA, twofaapi.TwoFaHandler(twoFaHandle))
 
 		deviceHandle := deviceapi.NewDeviceHandler(deviceService)
-		r.Mount("/api/idm/device", deviceapi.Handler(deviceHandle))
+		r.Mount(prefixConfig.Device, deviceapi.Handler(deviceHandle))
+
+		// Initialize session management (optional feature)
+		if config.SessionManagementConfig.Enabled {
+			slog.Info("Session management enabled")
+			sessionRepo := sessions.NewPostgresRepository(pool)
+			sessionService := sessions.NewService(sessionRepo)
+			sessionHandle := sessionsapi.NewHandler(sessionService)
+
+			// Determine session API prefix
+			sessionPrefix := config.SessionManagementConfig.APIPrefix
+			if sessionPrefix == "" {
+				// Default to using the IDM prefix + /sessions
+				sessionPrefix = prefixConfig.Profile + "/sessions"
+			}
+
+			// Mount session routes (requires authentication)
+			sessionRouter := chi.NewRouter()
+			sessionHandle.RegisterRoutes(sessionRouter)
+			r.Mount(sessionPrefix, sessionRouter)
+
+			slog.Info("Session management routes mounted", "prefix", sessionPrefix)
+		} else {
+			slog.Info("Session management disabled")
+		}
 
 		loginsRouter := chi.NewRouter()
 		loginsRouter.Group(func(r chi.Router) {
 			r.Use(client.AdminRoleMiddleware)
 			r.Mount("/", logins.Handler(loginsHandle))
 		})
-		r.Mount("/api/idm/logins", loginsRouter)
+		r.Mount(prefixConfig.Logins, loginsRouter)
 
 		// Initialize OAuth2 client management API (admin only)
 		oauth2ClientHandle := oauth2clientapi.NewHandle(clientService)
@@ -594,7 +812,7 @@ func main() {
 			r.Use(client.AdminRoleMiddleware)
 			r.Mount("/", oauth2clientapi.Handler(oauth2ClientHandle))
 		})
-		r.Mount("/api/idm/oauth2-clients", oauth2ClientRouter)
+		r.Mount(prefixConfig.OAuth2Clients, oauth2ClientRouter)
 
 		// Initialize impersonate service and routes
 		// impersonateService := impersonate.NewService(userMapper, nil)
@@ -603,45 +821,64 @@ func main() {
 
 	})
 
-	app.RoutesHealthzReady(server.R)
 	server.Run()
 }
 
-func createPasswordPolicy(config *PasswordComplexityConfig) *login.PasswordPolicy {
-	// If no config is provided, use the default policy
-	if config == nil {
-		return login.DefaultPasswordPolicy()
+// createPasswordPolicy now delegates to the shared config.ToPasswordPolicy method
+func createPasswordPolicy(cfg *PasswordComplexityConfig) *login.PasswordPolicy {
+	return cfg.ToPasswordPolicy()
+}
+
+// createRateLimitMiddleware creates and configures the rate limiting middleware
+func createRateLimitMiddleware(appConfig *Config, prefixConfig pkgconfig.PrefixConfig) *ratelimit.Middleware {
+	cfg := &ratelimit.Config{
+		GlobalEnabled:    appConfig.RateLimitConfig.GlobalEnabled,
+		GlobalCapacity:   appConfig.RateLimitConfig.GlobalCapacity,
+		GlobalRefillRate: appConfig.RateLimitConfig.GlobalRefillRate,
+
+		PerIPEnabled:    appConfig.RateLimitConfig.PerIPEnabled,
+		PerIPCapacity:   appConfig.RateLimitConfig.PerIPCapacity,
+		PerIPRefillRate: appConfig.RateLimitConfig.PerIPRefillRate,
+
+		PerUserEnabled:    appConfig.RateLimitConfig.PerUserEnabled,
+		PerUserCapacity:   appConfig.RateLimitConfig.PerUserCapacity,
+		PerUserRefillRate: appConfig.RateLimitConfig.PerUserRefillRate,
+
+		IncludeHeaders: appConfig.RateLimitConfig.IncludeHeaders,
+		BucketTTL:      1 * time.Hour, // Keep inactive buckets for 1 hour
+
+		EndpointLimits: make(map[string]ratelimit.EndpointLimit),
 	}
 
-	expirationPeriod, err := duration.Parse(config.ExpirationPeriod)
-	if err != nil {
-		slog.Error("Failed to parse expiration period", "err", err)
+	// Add endpoint-specific limits using the configured prefixes
+	if appConfig.RateLimitConfig.LoginEnabled {
+		cfg.EndpointLimits["POST "+prefixConfig.Auth+"/login"] = ratelimit.EndpointLimit{
+			Capacity:   appConfig.RateLimitConfig.LoginCapacity,
+			RefillRate: appConfig.RateLimitConfig.LoginRefillRate,
+		}
 	}
 
-	slog.Info("Expiration period", "expirationPeriod", expirationPeriod)
-
-	minPasswordAgePeriod, err := duration.Parse(config.MinPasswordAgePeriod)
-	if err != nil {
-		slog.Error("Failed to parse min password age period", "err", err)
+	if appConfig.RateLimitConfig.SignupEnabled {
+		cfg.EndpointLimits["POST "+prefixConfig.Signup] = ratelimit.EndpointLimit{
+			Capacity:   appConfig.RateLimitConfig.SignupCapacity,
+			RefillRate: appConfig.RateLimitConfig.SignupRefillRate,
+		}
 	}
 
-	slog.Info("Min password age period", "minPasswordAgePeriod", minPasswordAgePeriod)
-
-	// Create a policy based on the configuration
-	// FIX-ME: hard code for bat now
-	return &login.PasswordPolicy{
-		MinLength:            config.RequiredLength,
-		RequireUppercase:     config.RequiredUppercase,
-		RequireLowercase:     config.RequiredLowercase,
-		RequireDigit:         config.RequiredDigit,
-		RequireSpecialChar:   config.RequiredNonAlphanumeric,
-		DisallowCommonPwds:   config.DisallowCommonPwds,
-		MaxRepeatedChars:     config.MaxRepeatedChars,
-		HistoryCheckCount:    config.HistoryCheckCount,
-		ExpirationPeriod:     expirationPeriod.ToTimeDuration(),
-		CommonPasswordsPath:  "",
-		MinPasswordAgePeriod: minPasswordAgePeriod.ToTimeDuration(),
+	if appConfig.RateLimitConfig.PasswordResetEnabled {
+		cfg.EndpointLimits["POST "+prefixConfig.PasswordReset+"/request"] = ratelimit.EndpointLimit{
+			Capacity:   appConfig.RateLimitConfig.PasswordResetCapacity,
+			RefillRate: appConfig.RateLimitConfig.PasswordResetRefillRate,
+		}
 	}
+
+	// Add email resend endpoint limit (same as password reset)
+	cfg.EndpointLimits["POST "+prefixConfig.Email+"/resend"] = ratelimit.EndpointLimit{
+		Capacity:   3,
+		RefillRate: 3.0 / 600.0, // 3 per 10 minutes
+	}
+
+	return ratelimit.NewMiddleware(cfg)
 }
 
 // setupExternalProviders configures external OAuth2 providers based on environment variables
@@ -765,63 +1002,4 @@ func setupExternalProviders(service *externalprovider.ExternalProviderService, c
 		"microsoft", config.MicrosoftEnabled,
 		"github", config.GitHubEnabled,
 		"linkedin", config.LinkedInEnabled)
-}
-
-// setupDefaultOAuth2Clients configures default OAuth2 clients through the service layer
-func setupDefaultOAuth2Clients(service *oauth2client.ClientService) {
-	ctx := context.Background()
-
-	// Configure default Golang demo app client
-	defaultClient := &oauth2client.OAuth2Client{
-		ClientID:      "golang_app",
-		ClientSecret:  "BfCGGjEvIgD5EnnF3Q5EobrW95wK0tOK",
-		ClientName:    "Golang Demo App",
-		RedirectURIs:  []string{"http://localhost:8182/demo/callback"},
-		ResponseTypes: []string{"code"},
-		GrantTypes:    []string{"authorization_code"},
-		Scopes:        []string{"openid", "profile", "email"},
-		ClientType:    "confidential",
-	}
-
-	slog.Info("Creating default OAuth2 client",
-		"client_id", defaultClient.ClientID,
-		"client_name", defaultClient.ClientName,
-		"client_type", defaultClient.ClientType)
-
-	err := service.CreateClient(ctx, defaultClient)
-	if err != nil {
-		slog.Error("Failed to create default OAuth2 client", "error", err, "client_id", defaultClient.ClientID)
-	} else {
-		slog.Info("Default OAuth2 client configured successfully",
-			"client_id", defaultClient.ClientID,
-			"client_name", defaultClient.ClientName)
-	}
-
-	// Configure Concourse OAuth2 client
-	concourseClient := &oauth2client.OAuth2Client{
-		ClientID:      "concourse_client",
-		ClientSecret:  "concourse_secret",
-		ClientName:    "Concourse CI",
-		RedirectURIs:  []string{"http://localhost:8082/sky/issuer/callback"},
-		ResponseTypes: []string{"code"},
-		GrantTypes:    []string{"authorization_code"},
-		Scopes:        []string{"openid", "profile", "email"},
-		ClientType:    "confidential",
-	}
-
-	slog.Info("Creating Concourse OAuth2 client",
-		"client_id", concourseClient.ClientID,
-		"client_name", concourseClient.ClientName,
-		"client_type", concourseClient.ClientType)
-
-	err = service.CreateClient(ctx, concourseClient)
-	if err != nil {
-		slog.Error("Failed to create Concourse OAuth2 client", "error", err, "client_id", concourseClient.ClientID)
-	} else {
-		slog.Info("Concourse OAuth2 client configured successfully",
-			"client_id", concourseClient.ClientID,
-			"client_name", concourseClient.ClientName)
-	}
-
-	slog.Info("OAuth2 client setup completed")
 }

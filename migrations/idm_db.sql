@@ -17,17 +17,19 @@ SET client_min_messages = warning;
 SET row_security = off;
 
 --
--- Name: uuid-ossp; Type: EXTENSION; Schema: -; Owner: -
+-- Name: public; Type: SCHEMA; Schema: -; Owner: charlenewu
 --
 
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
+CREATE SCHEMA public;
 
+
+ALTER SCHEMA public OWNER TO charlenewu;
 
 --
--- Name: EXTENSION "uuid-ossp"; Type: COMMENT; Schema: -; Owner: 
+-- Name: SCHEMA public; Type: COMMENT; Schema: -; Owner: charlenewu
 --
 
-COMMENT ON EXTENSION "uuid-ossp" IS 'generate universally unique identifiers (UUIDs)';
+COMMENT ON SCHEMA public IS 'standard public schema';
 
 
 SET default_tablespace = '';
@@ -97,7 +99,7 @@ CREATE SEQUENCE public.goose_db_version_id_seq
     CACHE 1;
 
 
-ALTER TABLE public.goose_db_version_id_seq OWNER TO idm;
+ALTER SEQUENCE public.goose_db_version_id_seq OWNER TO idm;
 
 --
 -- Name: goose_db_version_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: idm
@@ -105,6 +107,22 @@ ALTER TABLE public.goose_db_version_id_seq OWNER TO idm;
 
 ALTER SEQUENCE public.goose_db_version_id_seq OWNED BY public.goose_db_version.id;
 
+
+--
+-- Name: groups; Type: TABLE; Schema: public; Owner: idm
+--
+
+CREATE TABLE public.groups (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name character varying(255) NOT NULL,
+    description text,
+    created_at timestamp without time zone DEFAULT (now() AT TIME ZONE 'UTC'::text),
+    updated_at timestamp without time zone DEFAULT (now() AT TIME ZONE 'UTC'::text),
+    deleted_at timestamp without time zone
+);
+
+
+ALTER TABLE public.groups OWNER TO idm;
 
 --
 -- Name: login; Type: TABLE; Schema: public; Owner: idm
@@ -156,7 +174,7 @@ ALTER TABLE public.login_2fa OWNER TO idm;
 
 CREATE TABLE public.login_attempt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    login_id uuid NOT NULL,
+    login_id uuid,
     created_at timestamp without time zone DEFAULT (now() AT TIME ZONE 'utc'::text) NOT NULL,
     ip_address character varying(45),
     user_agent text,
@@ -237,6 +255,55 @@ CREATE TABLE public.login_password_reset_tokens (
 ALTER TABLE public.login_password_reset_tokens OWNER TO idm;
 
 --
+-- Name: oauth2_client_redirect_uris; Type: TABLE; Schema: public; Owner: idm
+--
+
+CREATE TABLE public.oauth2_client_redirect_uris (
+    client_id uuid NOT NULL,
+    redirect_uri text NOT NULL,
+    created_at timestamp without time zone DEFAULT (now() AT TIME ZONE 'UTC'::text),
+    deleted_at timestamp without time zone
+);
+
+
+ALTER TABLE public.oauth2_client_redirect_uris OWNER TO idm;
+
+--
+-- Name: oauth2_client_scopes; Type: TABLE; Schema: public; Owner: idm
+--
+
+CREATE TABLE public.oauth2_client_scopes (
+    client_id uuid NOT NULL,
+    scope_id uuid NOT NULL,
+    created_at timestamp without time zone DEFAULT (now() AT TIME ZONE 'UTC'::text),
+    deleted_at timestamp without time zone
+);
+
+
+ALTER TABLE public.oauth2_client_scopes OWNER TO idm;
+
+--
+-- Name: oauth2_clients; Type: TABLE; Schema: public; Owner: idm
+--
+
+CREATE TABLE public.oauth2_clients (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    client_id character varying(255) NOT NULL,
+    client_secret_encrypted text NOT NULL,
+    client_name character varying(255) NOT NULL,
+    client_type character varying(50) NOT NULL,
+    require_pkce boolean DEFAULT true NOT NULL,
+    description text,
+    created_at timestamp without time zone DEFAULT (now() AT TIME ZONE 'UTC'::text),
+    updated_at timestamp without time zone DEFAULT (now() AT TIME ZONE 'UTC'::text),
+    created_by character varying(255),
+    deleted_at timestamp without time zone
+);
+
+
+ALTER TABLE public.oauth2_clients OWNER TO idm;
+
+--
 -- Name: roles; Type: TABLE; Schema: public; Owner: idm
 --
 
@@ -248,6 +315,36 @@ CREATE TABLE public.roles (
 
 
 ALTER TABLE public.roles OWNER TO idm;
+
+--
+-- Name: scopes; Type: TABLE; Schema: public; Owner: idm
+--
+
+CREATE TABLE public.scopes (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name character varying(255) NOT NULL,
+    description text,
+    created_at timestamp without time zone DEFAULT (now() AT TIME ZONE 'UTC'::text),
+    updated_at timestamp without time zone DEFAULT (now() AT TIME ZONE 'UTC'::text),
+    deleted_at timestamp without time zone
+);
+
+
+ALTER TABLE public.scopes OWNER TO idm;
+
+--
+-- Name: user_groups; Type: TABLE; Schema: public; Owner: idm
+--
+
+CREATE TABLE public.user_groups (
+    user_id uuid NOT NULL,
+    group_id uuid NOT NULL,
+    assigned_at timestamp without time zone DEFAULT (now() AT TIME ZONE 'UTC'::text),
+    deleted_at timestamp without time zone
+);
+
+
+ALTER TABLE public.user_groups OWNER TO idm;
 
 --
 -- Name: user_roles; Type: TABLE; Schema: public; Owner: idm
@@ -320,6 +417,22 @@ ALTER TABLE ONLY public.goose_db_version
 
 
 --
+-- Name: groups groups_name_key; Type: CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.groups
+    ADD CONSTRAINT groups_name_key UNIQUE (name);
+
+
+--
+-- Name: groups groups_pkey; Type: CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.groups
+    ADD CONSTRAINT groups_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: login_2fa login_2fa_pkey; Type: CONSTRAINT; Schema: public; Owner: idm
 --
 
@@ -376,6 +489,38 @@ ALTER TABLE ONLY public.login
 
 
 --
+-- Name: oauth2_client_redirect_uris oauth2_client_redirect_uris_pkey; Type: CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.oauth2_client_redirect_uris
+    ADD CONSTRAINT oauth2_client_redirect_uris_pkey PRIMARY KEY (client_id, redirect_uri);
+
+
+--
+-- Name: oauth2_client_scopes oauth2_client_scopes_pkey; Type: CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.oauth2_client_scopes
+    ADD CONSTRAINT oauth2_client_scopes_pkey PRIMARY KEY (client_id, scope_id);
+
+
+--
+-- Name: oauth2_clients oauth2_clients_client_id_key; Type: CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.oauth2_clients
+    ADD CONSTRAINT oauth2_clients_client_id_key UNIQUE (client_id);
+
+
+--
+-- Name: oauth2_clients oauth2_clients_pkey; Type: CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.oauth2_clients
+    ADD CONSTRAINT oauth2_clients_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: login_password_reset_tokens password_reset_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: idm
 --
 
@@ -397,6 +542,30 @@ ALTER TABLE ONLY public.roles
 
 ALTER TABLE ONLY public.roles
     ADD CONSTRAINT roles_role_name_key UNIQUE (name);
+
+
+--
+-- Name: scopes scopes_name_key; Type: CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.scopes
+    ADD CONSTRAINT scopes_name_key UNIQUE (name);
+
+
+--
+-- Name: scopes scopes_pkey; Type: CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.scopes
+    ADD CONSTRAINT scopes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: user_groups user_groups_pkey; Type: CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.user_groups
+    ADD CONSTRAINT user_groups_pkey PRIMARY KEY (user_id, group_id);
 
 
 --
@@ -434,6 +603,13 @@ CREATE INDEX idx_backup_codes_user_uuid ON public.backup_codes USING btree (user
 --
 
 CREATE INDEX idx_device_device_id ON public.device USING btree (device_id);
+
+
+--
+-- Name: idx_groups_name; Type: INDEX; Schema: public; Owner: idm
+--
+
+CREATE INDEX idx_groups_name ON public.groups USING btree (name);
 
 
 --
@@ -483,6 +659,20 @@ CREATE INDEX idx_login_password_reset_tokens_login_id ON public.login_password_r
 --
 
 CREATE INDEX idx_login_password_reset_tokens_token ON public.login_password_reset_tokens USING btree (token);
+
+
+--
+-- Name: idx_user_groups_group_id; Type: INDEX; Schema: public; Owner: idm
+--
+
+CREATE INDEX idx_user_groups_group_id ON public.user_groups USING btree (group_id);
+
+
+--
+-- Name: idx_user_groups_user_id; Type: INDEX; Schema: public; Owner: idm
+--
+
+CREATE INDEX idx_user_groups_user_id ON public.user_groups USING btree (user_id);
 
 
 --
@@ -564,6 +754,46 @@ ALTER TABLE ONLY public.login_password_reset_tokens
 
 
 --
+-- Name: oauth2_client_redirect_uris oauth2_client_redirect_uris_client_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.oauth2_client_redirect_uris
+    ADD CONSTRAINT oauth2_client_redirect_uris_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.oauth2_clients(id);
+
+
+--
+-- Name: oauth2_client_scopes oauth2_client_scopes_client_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.oauth2_client_scopes
+    ADD CONSTRAINT oauth2_client_scopes_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.oauth2_clients(id);
+
+
+--
+-- Name: oauth2_client_scopes oauth2_client_scopes_scope_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.oauth2_client_scopes
+    ADD CONSTRAINT oauth2_client_scopes_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES public.scopes(id);
+
+
+--
+-- Name: user_groups user_groups_group_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.user_groups
+    ADD CONSTRAINT user_groups_group_id_fkey FOREIGN KEY (group_id) REFERENCES public.groups(id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_groups user_groups_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: idm
+--
+
+ALTER TABLE ONLY public.user_groups
+    ADD CONSTRAINT user_groups_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: user_roles user_roles_role_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: idm
 --
 
@@ -585,6 +815,14 @@ ALTER TABLE ONLY public.user_roles
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_login_id_fkey FOREIGN KEY (login_id) REFERENCES public.login(id);
+
+
+--
+-- Name: SCHEMA public; Type: ACL; Schema: -; Owner: charlenewu
+--
+
+REVOKE USAGE ON SCHEMA public FROM PUBLIC;
+GRANT ALL ON SCHEMA public TO PUBLIC;
 
 
 --

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"log/slog"
@@ -12,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/tendant/simple-idm/pkg/login/logindb"
 	"github.com/tendant/simple-idm/pkg/mapper"
-	"github.com/tendant/simple-idm/pkg/notice"
 	"github.com/tendant/simple-idm/pkg/notification"
 	"github.com/tendant/simple-idm/pkg/utils"
 )
@@ -157,8 +157,9 @@ func NewLoginService(
 
 // NewLoginServiceWithOptions creates a new LoginService with the given options
 func NewLoginServiceWithOptions(repository LoginRepository, opts ...Option) *LoginService {
-	// Create a default password manager
-	passwordManager := NewPasswordManagerWithRepository(repository)
+	// Create a default password manager with permissive NoOp policy
+	passwordManager := NewPasswordManagerWithRepository(repository).
+		WithPolicyChecker(NewDefaultPasswordPolicyChecker(NoOpPasswordPolicy(), nil))
 
 	// Create service with default values
 	ls := &LoginService{
@@ -197,6 +198,7 @@ type LoginResult struct {
 
 const (
 	FAILURE_REASON_INTERNAL_ERROR        = "internal_error"
+	FAILURE_REASON_INVALID_USERNAME      = "invalid_username"
 	FAILURE_REASON_ACCOUNT_LOCKED        = "account_locked"
 	FAILURE_REASON_PASSWORD_EXPIRED      = "password_expired"
 	FAILURE_REASON_INVALID_CREDENTIALS   = "invalid_credentials"
@@ -249,7 +251,7 @@ func (s *LoginService) FindLoginByUsername(ctx context.Context, username string)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			slog.Error("no login found with username", "err", err, "username", username)
-			return LoginEntity{}, fmt.Errorf("invalid username or password")
+			return LoginEntity{}, fmt.Errorf("no login found with username")
 		}
 		slog.Error("error finding login with username", "err", err, "username", username)
 		return LoginEntity{}, fmt.Errorf("error finding user: %w", err)
@@ -289,7 +291,12 @@ func (s *LoginService) Login(ctx context.Context, username, password string) (Lo
 	// Find user by username
 	login, err := s.FindLoginByUsername(ctx, username)
 	if err != nil {
-		result.FailureReason = FAILURE_REASON_INTERNAL_ERROR
+		if strings.Contains(err.Error(), "no login found with username") {
+			result.FailureReason = FAILURE_REASON_INVALID_USERNAME
+			result.LoginID = uuid.Nil // Explicitly set to nil for non-existent users
+		} else {
+			result.FailureReason = FAILURE_REASON_INTERNAL_ERROR
+		}
 		return result, fmt.Errorf("error finding login: %w", err)
 	}
 
@@ -340,8 +347,9 @@ func (s *LoginService) Login(ctx context.Context, username, password string) (Lo
 		result.FailureReason = FAILURE_REASON_INTERNAL_ERROR
 		return result, err
 	}
+
 	if !valid {
-		slog.Error("invalid username or password from check password by login id")
+		slog.Error("invalid password from check password by login id")
 
 		// Set failure information
 		result.FailureReason = FAILURE_REASON_INVALID_CREDENTIALS
@@ -356,9 +364,10 @@ func (s *LoginService) Login(ctx context.Context, username, password string) (Lo
 			return result, &AccountLockedError{LoginID: login.ID, LockedUntil: lockedUntil}
 		}
 
-		return result, fmt.Errorf("invalid username or password")
+		return result, fmt.Errorf("invalid password")
 	}
-	slog.Info("password valid", "login id", login.ID)
+
+	slog.Info("password valid", "login id", login.ID, "username", login.Username)
 
 	// Check if password is expired
 	isExpired, err := s.passwordManager.IsPasswordExpired(ctx, login.ID.String())
@@ -802,7 +811,7 @@ func (s *LoginService) SendPasswordResetEmail(ctx context.Context, param SendPas
 		"UserId":   param.UserId,
 		"Username": param.Username,
 	}
-	return s.notificationManager.Send(notice.PasswordResetInit, notification.NotificationData{
+	return s.notificationManager.Send(notification.PasswordResetInit, notification.NotificationData{
 		To:   param.Email,
 		Data: data,
 	})
@@ -814,7 +823,7 @@ func (s *LoginService) SendMagicLinkEmail(ctx context.Context, param SendMagicLi
 		return errors.New("notification manager is not configured")
 	}
 
-	magicLink := fmt.Sprintf("%s/magic-link-validate?token=%s", s.notificationManager.BaseUrl, param.Token)
+	magicLink := fmt.Sprintf("%s/magic-link/validate?token=%s", s.notificationManager.BaseUrl, param.Token)
 	slog.Info("Sending magic link email", "email", param.Email)
 
 	data := map[string]string{
@@ -823,7 +832,7 @@ func (s *LoginService) SendMagicLinkEmail(ctx context.Context, param SendMagicLi
 		"ExpirationTime": fmt.Sprintf("%d", int(s.magicLinkTokenExpiration.Hours())),
 	}
 
-	return s.notificationManager.Send(notice.MagicLinkLogin, notification.NotificationData{
+	return s.notificationManager.Send(notification.MagicLinkLogin, notification.NotificationData{
 		To:   param.Email,
 		Data: data,
 	})
@@ -1126,7 +1135,7 @@ func (s *LoginService) FindUsernameByEmail(ctx context.Context, email string) (s
 func (s *LoginService) RecordLoginAttempt(ctx context.Context, loginID uuid.UUID, ipAddress, userAgent, deviceFingerprint string, success bool, failureReason string) error {
 	// Record the login attempt in the repository
 	err := s.repository.RecordLoginAttempt(ctx, LoginAttempt{
-		LoginID:           loginID,
+		LoginID:           utils.ToNullUUID(loginID),
 		IPAddress:         ipAddress,
 		UserAgent:         userAgent,
 		DeviceFingerprint: deviceFingerprint,

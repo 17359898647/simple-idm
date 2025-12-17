@@ -81,7 +81,7 @@ type Config struct {
 func NewProtectedResourceMetadata(config Config) *ProtectedResourceMetadata {
 	scopes := config.Scopes
 	if len(scopes) == 0 {
-		scopes = []string{"openid", "profile", "email"}
+		scopes = []string{"openid", "profile", "email", "groups"}
 	}
 
 	return &ProtectedResourceMetadata{
@@ -97,15 +97,15 @@ func NewProtectedResourceMetadata(config Config) *ProtectedResourceMetadata {
 func NewAuthorizationServerMetadata(config Config) *AuthorizationServerMetadata {
 	scopes := config.Scopes
 	if len(scopes) == 0 {
-		scopes = []string{"openid", "profile", "email"}
+		scopes = []string{"openid", "profile", "email", "groups"}
 	}
 
 	return &AuthorizationServerMetadata{
 		Issuer:                            config.AuthorizationServerURI,
-		AuthorizationEndpoint:             config.BaseURL + "/api/idm/oauth2/authorize",
-		TokenEndpoint:                     config.BaseURL + "/api/idm/oauth2/token",
-		JwksURI:                           config.BaseURL + "/api/idm/oauth2/jwks",
-		UserinfoEndpoint:                  config.BaseURL + "/api/idm/oauth2/userinfo",
+		AuthorizationEndpoint:             config.BaseURL + "/oauth2/authorize", // User-facing endpoint
+		TokenEndpoint:                     config.BaseURL + "/api/oauth2/token",
+		JwksURI:                           config.BaseURL + "/api/oauth2/jwks",
+		UserinfoEndpoint:                  config.BaseURL + "/api/oauth2/userinfo",
 		ScopesSupported:                   scopes,
 		ResponseTypesSupported:            []string{"code"},
 		GrantTypesSupported:               []string{"authorization_code"},

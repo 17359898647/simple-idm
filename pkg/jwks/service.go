@@ -16,41 +16,41 @@ type JWKSService struct {
 }
 
 // NewJWKSService creates a new JWKS service with the provided repository
-func NewJWKSService(repository JWKSRepository) (*JWKSService, error) {
+func NewJWKSService(repository JWKSRepository, keyPair *KeyPair) (*JWKSService, error) {
 	service := &JWKSService{
 		repository: repository,
 	}
 
-	// Load existing keys or create new ones
+	key := &KeyPair{
+		Kid:        keyPair.Kid,
+		Alg:        keyPair.Alg,
+		PrivateKey: keyPair.PrivateKey,
+		PublicKey:  &keyPair.PrivateKey.PublicKey,
+		Active:     true, // First key is active by default
+	}
+
 	ctx := context.Background()
-	keyStore, err := service.repository.GetKeyStore(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get key store: %w", err)
+	if err := service.repository.AddKey(ctx, key); err != nil {
+		return nil, fmt.Errorf("failed to add initial key: %w", err)
 	}
 
-	// Find active key
-	for _, keyPair := range keyStore.Keys {
-		if keyPair.Active {
-			service.activeKeyID = keyPair.Kid
-			break
-		}
-	}
-
-	// If no keys exist, generate initial key
-	if len(keyStore.Keys) == 0 {
-		slog.Info("No keys found, generating initial key")
-		if err := service.generateInitialKey(); err != nil {
-			return nil, fmt.Errorf("failed to generate initial key: %w", err)
-		}
-	}
+	service.activeKeyID = key.Kid
 
 	return service, nil
 }
 
 // NewJWKSServiceWithInMemoryStorage creates a new JWKS service with in-memory storage
-func NewJWKSServiceWithInMemoryStorage() (*JWKSService, error) {
+func NewJWKSServiceWithKey(keyPair *KeyPair) (*JWKSService, error) {
 	repository := NewInMemoryJWKSRepository()
-	return NewJWKSService(repository)
+	return NewJWKSService(repository, keyPair)
+}
+
+func NewJWKSServiceWithInMemoryStorage() (*JWKSService, error) {
+	service := &JWKSService{
+		repository: NewInMemoryJWKSRepository(),
+	}
+	service.generateInitialKey()
+	return service, nil
 }
 
 // GetJWKS returns the public keys in JWKS format
@@ -105,7 +105,7 @@ func (s *JWKSService) GetKeyByID(kid string) (*KeyPair, error) {
 
 // GenerateNewKey generates a new RSA key pair and adds it to the store
 func (s *JWKSService) GenerateNewKey() (*KeyPair, error) {
-	privateKey, err := generateRSAKeyPair(2048)
+	privateKey, err := GenerateRSAKeyPair(2048)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate RSA key pair: %w", err)
 	}
@@ -115,7 +115,7 @@ func (s *JWKSService) GenerateNewKey() (*KeyPair, error) {
 		Alg:        "RS256",
 		PrivateKey: privateKey,
 		PublicKey:  &privateKey.PublicKey,
-		CreatedAt:  time.Now().Unix(),
+		CreatedAt:  time.Now().UTC(),
 		Active:     false, // New keys are not active by default
 	}
 
@@ -149,7 +149,7 @@ func (s *JWKSService) RotateKeys() (*KeyPair, error) {
 
 // generateInitialKey generates the first key pair for the service
 func (s *JWKSService) generateInitialKey() error {
-	privateKey, err := generateRSAKeyPair(2048)
+	privateKey, err := GenerateRSAKeyPair(2048)
 	if err != nil {
 		return fmt.Errorf("failed to generate initial RSA key pair: %w", err)
 	}
@@ -159,7 +159,7 @@ func (s *JWKSService) generateInitialKey() error {
 		Alg:        "RS256",
 		PrivateKey: privateKey,
 		PublicKey:  &privateKey.PublicKey,
-		CreatedAt:  time.Now().Unix(),
+		CreatedAt:  time.Now().UTC(),
 		Active:     true, // First key is active by default
 	}
 

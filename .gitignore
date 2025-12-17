@@ -1,3 +1,14 @@
+## Ignore all files without extension
+# Ignore all
+*
+# Unignore all with extensions
+!*.*
+# Unignore all dirs
+!*/
+
+!Makefile
+!Dockerfile
+
 dist/
 node_modules/
 
@@ -6,4 +17,11 @@ idm_db_all.sql
 .vscode/
 .DS_Store
 **/.DS_Store
+
 *.env
+
+# PEM files (private keys, certificates, etc.)
+*.pem
+
+
+.claude/

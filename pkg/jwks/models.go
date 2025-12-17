@@ -3,6 +3,7 @@ package jwks
 import (
 	"crypto/rsa"
 	"encoding/json"
+	"time"
 )
 
 // JWKS represents a JSON Web Key Set as defined in RFC 7517
@@ -33,7 +34,7 @@ type JWK struct {
 
 // KeyPair represents an RSA key pair with metadata
 type KeyPair struct {
-	// Key ID - unique identifier
+	// Key ID - unique identifier (can be UUID string or custom string)
 	Kid string `json:"kid"`
 
 	// Algorithm used with this key
@@ -45,8 +46,11 @@ type KeyPair struct {
 	// RSA public key (derived from private key)
 	PublicKey *rsa.PublicKey `json:"-"`
 
-	// Creation timestamp
-	CreatedAt int64 `json:"created_at"`
+	// Creation timestamp (Unix timestamp for backward compatibility)
+	CreatedAt time.Time `json:"created_at"`
+
+	// Update timestamp (Unix timestamp)
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 
 	// Whether this is the active signing key
 	Active bool `json:"active"`
@@ -59,8 +63,8 @@ func (kp *KeyPair) ToJWK() *JWK {
 		Use: "sig",
 		Kid: kp.Kid,
 		Alg: kp.Alg,
-		N:   encodeRSAPublicKeyModulus(kp.PublicKey),
-		E:   encodeRSAPublicKeyExponent(kp.PublicKey),
+		N:   EncodeRSAPublicKeyModulus(kp.PublicKey),
+		E:   EncodeRSAPublicKeyExponent(kp.PublicKey),
 	}
 }
 
@@ -78,8 +82,8 @@ func (kp *KeyPair) MarshalJSON() ([]byte, error) {
 		PublicKeyPEM  string `json:"public_key_pem"`
 	}{
 		Alias:         (*Alias)(kp),
-		PrivateKeyPEM: encodePrivateKeyToPEM(kp.PrivateKey),
-		PublicKeyPEM:  encodePublicKeyToPEM(kp.PublicKey),
+		PrivateKeyPEM: EncodePrivateKeyToPEM(kp.PrivateKey),
+		PublicKeyPEM:  EncodePublicKeyToPEM(kp.PublicKey),
 	})
 }
 
@@ -99,13 +103,13 @@ func (kp *KeyPair) UnmarshalJSON(data []byte) error {
 	}
 
 	// Decode PEM keys
-	privateKey, err := decodePrivateKeyFromPEM(aux.PrivateKeyPEM)
+	privateKey, err := DecodePrivateKeyFromPEM(aux.PrivateKeyPEM)
 	if err != nil {
 		return err
 	}
 	kp.PrivateKey = privateKey
 
-	publicKey, err := decodePublicKeyFromPEM(aux.PublicKeyPEM)
+	publicKey, err := DecodePublicKeyFromPEM(aux.PublicKeyPEM)
 	if err != nil {
 		return err
 	}

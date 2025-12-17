@@ -7,6 +7,9 @@ import EditUser from './pages/EditUser';
 import Roles from './pages/Roles';
 import CreateRole from './pages/CreateRole';
 import EditRole from './pages/EditRole';
+import Groups from './pages/Groups';
+import EditGroup from './pages/EditGroup';
+import GroupUsers from './pages/GroupUsers';
 import Logins from './pages/Logins';
 import CreateLogin from './pages/CreateLogin';
 import EditLogin from './pages/EditLogin';
@@ -24,6 +27,7 @@ import TwoFactorVerification from './pages/TwoFactorVerification';
 import PasswordlessSignup from './pages/PasswordlessSignup';
 import MagicLinkLogin from './pages/MagicLinkLogin';
 import MagicLinkValidate from './pages/MagicLinkValidate';
+import VerifyEmail from './pages/VerifyEmail';
 
 const UsersPage: Component = () => {
   return (
@@ -87,6 +91,43 @@ const EditRolePage: Component = () => {
         <Navigation />
         <Suspense>
           <EditRole />
+        </Suspense>
+      </main>
+    </div>
+  );
+};
+
+const GroupsPage: Component = () => {
+  return (
+    <div class="min-h-screen bg-gray-1">
+      <main class="py-10 px-4 sm:px-6 lg:px-8">
+        <Navigation />
+        <Groups />
+      </main>
+    </div>
+  );
+};
+
+const EditGroupPage: Component = () => {
+  return (
+    <div class="min-h-screen bg-gray-1">
+      <main class="py-10 px-4 sm:px-6 lg:px-8">
+        <Navigation />
+        <Suspense>
+          <EditGroup />
+        </Suspense>
+      </main>
+    </div>
+  );
+};
+
+const GroupUsersPage: Component = () => {
+  return (
+    <div class="min-h-screen bg-gray-1">
+      <main class="py-10 px-4 sm:px-6 lg:px-8">
+        <Navigation />
+        <Suspense>
+          <GroupUsers />
         </Suspense>
       </main>
     </div>
@@ -210,6 +251,7 @@ const App: Component = () => {
       <Route path="/magic-link-login" component={MagicLinkLogin} />
       <Route path="/magic-link-validate" component={MagicLinkValidate} />
       <Route path="/two-factor-verification" component={TwoFactorVerification} />
+      <Route path="/verify-email" component={VerifyEmail} />
       <Route path="/" component={UsersPage} />
       <Route path="/users" component={UsersPage} />
       <Route path="/users/create" component={CreateUserPage} />
@@ -217,6 +259,9 @@ const App: Component = () => {
       <Route path="/roles" component={RolesPage} />
       <Route path="/roles/create" component={CreateRolePage} />
       <Route path="/roles/:id/edit" component={EditRolePage} />
+      <Route path="/groups" component={GroupsPage} />
+      <Route path="/groups/:id/edit" component={EditGroupPage} />
+      <Route path="/groups/:id/users" component={GroupUsersPage} />
       <Route path="/logins" component={LoginsPage} />
       <Route path="/logins/create" component={CreateLoginPage} />
       <Route path="/logins/:id/detail" component={LoginDetailPage} />

@@ -117,15 +117,36 @@ func (h Handle) PostLogin(w http.ResponseWriter, r *http.Request) *Response {
 		email := mu.UserInfo.Email
 		name := mu.DisplayName
 
+		// Use the Roles field directly - it's always populated and safe
+		roles := mu.Roles
+		var firstRole string
+		if len(roles) > 0 {
+			firstRole = roles[0]
+		}
+
 		apiUsers[i] = User{
 			ID:    mu.UserId,
 			Name:  name,
 			Email: email,
-			Role:  mu.ExtraClaims["roles"].([]string)[0],
+			Role:  firstRole, // Backward compatibility
+			Roles: roles,     // New array field
 		}
 	}
 
 	h.tokenCookieService.SetTokensCookie(w, result.Tokens)
+
+	// Safety check: ensure we have at least one user
+	if len(apiUsers) == 0 {
+		slog.Error("Login successful but no users found in result",
+			"loginID", result.LoginID,
+			"tokens_present", len(result.Tokens) > 0)
+		return &Response{
+			Code: http.StatusInternalServerError,
+			body: map[string]string{
+				"error": "Login succeeded but user data not found",
+			},
+		}
+	}
 
 	// Create response with user information
 	response := Login{
@@ -186,11 +207,19 @@ func (h Handle) LoginByEmail(w http.ResponseWriter, r *http.Request) *Response {
 		email := mu.UserInfo.Email
 		name := mu.DisplayName
 
+		// Use the Roles field directly - it's always populated and safe
+		roles := mu.Roles
+		var firstRole string
+		if len(roles) > 0 {
+			firstRole = roles[0]
+		}
+
 		apiUsers[i] = User{
 			ID:    mu.UserId,
 			Name:  name,
 			Email: email,
-			Role:  mu.ExtraClaims["roles"].([]string)[0],
+			Role:  firstRole, // Backward compatibility
+			Roles: roles,     // New array field
 		}
 	}
 
@@ -490,7 +519,6 @@ func (h Handle) PostUserSwitch(w http.ResponseWriter, r *http.Request) *Response
 	}
 
 	result := h.loginFlowService.ProcessUserSwitch(r.Context(), switchRequest)
-	slog.Info("User switch result", "result", result)
 
 	// Handle error responses
 	if result.ErrorResponse != nil {
@@ -1167,11 +1195,19 @@ func (h Handle) ValidateMagicLinkToken(w http.ResponseWriter, r *http.Request, p
 		email := mu.UserInfo.Email
 		name := mu.DisplayName
 
+		// Use the Roles field directly - it's always populated and safe
+		roles := mu.Roles
+		var firstRole string
+		if len(roles) > 0 {
+			firstRole = roles[0]
+		}
+
 		apiUsers[i] = User{
 			ID:    mu.UserId,
 			Name:  name,
 			Email: email,
-			Role:  mu.ExtraClaims["roles"].([]string)[0],
+			Role:  firstRole, // Backward compatibility
+			Roles: roles,     // New array field
 		}
 	}
 

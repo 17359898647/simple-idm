@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tendant/simple-idm/pkg/iam"
-	"github.com/tendant/simple-idm/pkg/iam/iamdb"
 	"github.com/tendant/simple-idm/pkg/logins"
 )
 
@@ -18,22 +17,22 @@ import (
 type UserService struct {
 	iamService    *iam.IamService
 	loginsService *logins.LoginsService
-	iamQueries    *iamdb.Queries
 }
 
 // NewUserService creates a new user service
-func NewUserService(iamService *iam.IamService, loginsService *logins.LoginsService, iamQueries *iamdb.Queries) *UserService {
+func NewUserService(iamService *iam.IamService, loginsService *logins.LoginsService) *UserService {
 	return &UserService{
 		iamService:    iamService,
 		loginsService: loginsService,
-		iamQueries:    iamQueries,
 	}
 }
 
 // CreateAdminUserOptions contains options for creating an admin user
 type CreateAdminUserOptions struct {
-	Username string // Default: "super"
-	Email    string // Default: "{username}@example.com"
+	Username      string // Default: "super"
+	Email         string // Default: "{username}@example.com"
+	Password      string // Optional: if empty, a secure password will be generated
+	AdminRoleName string // Default: "admin" - the name of the admin role to create/assign
 }
 
 // CreateAdminUserResult contains the result of creating an admin user
@@ -59,30 +58,57 @@ func (s *UserService) CreateAdminUser(ctx context.Context, options CreateAdminUs
 		email = fmt.Sprintf("%s@example.com", username)
 	}
 
-	slog.Info("Creating admin user", "username", username, "email", email)
+	adminRoleName := options.AdminRoleName
+	if adminRoleName == "" {
+		adminRoleName = "admin" // Default
+	}
+
+	slog.Info("Creating admin user", "username", username, "email", email, "admin_role", adminRoleName)
 
 	// Step 1: Create or find admin role
-	adminRoleID, err := s.ensureAdminRole(ctx)
+	adminRoleID, err := s.ensureAdminRole(ctx, adminRoleName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure admin role exists: %w", err)
 	}
-	slog.Info("Admin role ensured", "role_id", adminRoleID)
+	slog.Info("Admin role ensured", "role_id", adminRoleID, "role_name", adminRoleName)
 
-	// Step 2: Generate secure password
-	password, err := s.generateSecurePassword()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate secure password: %w", err)
+	// Step 2: Use provided password or generate secure password
+	password := options.Password
+	if password == "" {
+		var err error
+		password, err = s.generateSecurePassword()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate secure password: %w", err)
+		}
 	}
 
-	// Step 3: Create login record
-	loginModel, err := s.loginsService.CreateLogin(ctx, logins.LoginCreateRequest{
-		Username: username,
-		Password: password,
-	}, "system")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create login: %w", err)
+	// Step 3: Create or find login record
+	// Check if login with this username already exists (orphaned from deleted user)
+	existingLogin, err := s.loginsService.GetLoginByUsername(ctx, username)
+	var loginModel *logins.LoginModel
+
+	if err == nil {
+		// Login exists - must be orphaned since AnyUserExists returned false
+		// Reuse the orphaned login for the new admin user
+		slog.Info("Found orphaned login from deleted user, reusing for new admin",
+			"login_id", existingLogin.ID,
+			"username", username,
+			"note", "Using existing login record - password unchanged")
+		loginModel = &logins.LoginModel{
+			ID:       existingLogin.ID.String(),
+			Username: existingLogin.Username,
+		}
+	} else {
+		// Login doesn't exist - create new one
+		loginModel, err = s.loginsService.CreateLogin(ctx, logins.LoginCreateRequest{
+			Username: username,
+			Password: password,
+		}, "system")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create login: %w", err)
+		}
+		slog.Info("Login created", "login_id", loginModel.ID, "username", username)
 	}
-	slog.Info("Login created", "login_id", loginModel.ID, "username", username)
 
 	// Step 4: Create user record with admin role
 	userWithRoles, err := s.iamService.CreateUser(ctx, email, username, "", []uuid.UUID{adminRoleID}, loginModel.ID)
@@ -113,28 +139,30 @@ func (s *UserService) CreateAdminUser(ctx context.Context, options CreateAdminUs
 }
 
 // ensureAdminRole creates the admin role if it doesn't exist, or returns its ID if it does
-func (s *UserService) ensureAdminRole(ctx context.Context) (uuid.UUID, error) {
+// roleName specifies the name of the admin role to create/find
+func (s *UserService) ensureAdminRole(ctx context.Context, roleName string) (uuid.UUID, error) {
 	// Try to find existing admin role
-	roles, err := s.iamQueries.FindRoles(ctx)
+	roles, err := s.iamService.FindRoles(ctx)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("failed to find existing roles: %w", err)
 	}
 
-	// Check if admin role already exists
+	// Check if admin role already exists (case-insensitive)
+	roleNameLower := strings.ToLower(roleName)
 	for _, role := range roles {
-		if strings.ToLower(role.Name) == "admin" {
-			slog.Info("Admin role already exists", "role_id", role.ID)
+		if strings.ToLower(role.Name) == roleNameLower {
+			slog.Info("Admin role already exists", "role_id", role.ID, "role_name", role.Name)
 			return role.ID, nil
 		}
 	}
 
 	// Create admin role if it doesn't exist
-	adminRoleID, err := s.iamQueries.CreateRole(ctx, "admin")
+	adminRoleID, err := s.iamService.CreateRole(ctx, roleName)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("failed to create admin role: %w", err)
 	}
 
-	slog.Info("Admin role created", "role_id", adminRoleID)
+	slog.Info("Admin role created", "role_id", adminRoleID, "role_name", roleName)
 	return adminRoleID, nil
 }
 

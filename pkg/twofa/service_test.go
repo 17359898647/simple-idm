@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tendant/simple-idm/pkg/notice"
 	"github.com/tendant/simple-idm/pkg/notification"
 	"github.com/tendant/simple-idm/pkg/twofa/twofadb"
 )
@@ -115,9 +114,10 @@ func TestGetTwoFactorSecretByLoginUuid(t *testing.T) {
 	// defer cleanup()
 	setup()
 
-	// Create queries and service
+	// Create queries, repository and service
 	queries := twofadb.New(dbPool)
-	service := NewTwoFaService(queries)
+	repo := NewPostgresTwoFARepository(queries)
+	service := NewTwoFaService(repo)
 
 	// Create a test user with a known password
 	ctx := context.Background()
@@ -131,9 +131,9 @@ func TestGetTwoFactorSecretByLoginUuid(t *testing.T) {
 }
 
 func TestInitTwoFa(t *testing.T) {
-	notificationManager, err := notice.NewNotificationManager(
+	notificationManager, err := notification.NewNotificationManagerWithOptions(
 		"http://localhost:3000",
-		notice.WithSMTP(notification.SMTPConfig{
+		notification.WithSMTP(notification.SMTPConfig{
 			Host:     "localhost",
 			Port:     1025,
 			Username: "noreply@example.com",
@@ -150,7 +150,8 @@ func TestInitTwoFa(t *testing.T) {
 
 	// Create queries and service
 	queries := twofadb.New(dbPool)
-	service := NewTwoFaService(queries, WithNotificationManager(notificationManager))
+	repo := NewPostgresTwoFARepository(queries)
+	service := NewTwoFaService(repo, WithNotificationManager(notificationManager))
 
 	err = service.SendTwoFaNotification(context.Background(), uuid.MustParse("cf9eca06-ecd3-4fd8-a291-a78d4f340ce8"), uuid.MustParse("cf9eca06-ecd3-4fd8-a291-a78d4f340ce8"), "email", "admin@example.com")
 	require.NoError(t, err)
@@ -162,9 +163,10 @@ func TestEnableTwoFactor(t *testing.T) {
 	// defer cleanup()
 	setup()
 
-	// Create queries and service
+	// Create queries, repository and service
 	queries := twofadb.New(dbPool)
-	service := NewTwoFaService(queries)
+	repo := NewPostgresTwoFARepository(queries)
+	service := NewTwoFaService(repo)
 
 	// Call the EnableTwoFactor method
 	err := service.EnableTwoFactor(context.Background(), uuid.MustParse("d315f240-ccd1-4afd-b6e6-b5fba6084f74"), "email")
@@ -179,9 +181,10 @@ func TestDisableTwoFactor(t *testing.T) {
 	// defer cleanup()
 	setup()
 
-	// Create queries and service
+	// Create queries, repository and service
 	queries := twofadb.New(dbPool)
-	service := NewTwoFaService(queries)
+	repo := NewPostgresTwoFARepository(queries)
+	service := NewTwoFaService(repo)
 
 	// Call the DisableTwoFactor method
 	err := service.DisableTwoFactor(context.Background(), uuid.MustParse("cf9eca06-ecd3-4fd8-a291-a78d4f340ce8"), "email")
@@ -194,9 +197,10 @@ func TestDisableTwoFactor(t *testing.T) {
 func TestDeleteTwoFactor(t *testing.T) {
 	setup()
 
-	// Create queries and service
+	// Create queries, repository and service
 	queries := twofadb.New(dbPool)
-	service := NewTwoFaService(queries)
+	repo := NewPostgresTwoFARepository(queries)
+	service := NewTwoFaService(repo)
 
 	loginId := uuid.MustParse("92d4479a-7692-4d9d-a4c1-77f203e4b621")
 	TwoFaId := uuid.MustParse("83168a16-7c74-438c-94ea-5aacae00881f")
@@ -211,9 +215,9 @@ func TestDeleteTwoFactor(t *testing.T) {
 }
 
 func TestValidate2faPasscode(t *testing.T) {
-	notificationManager, err := notice.NewNotificationManager(
+	notificationManager, err := notification.NewNotificationManagerWithOptions(
 		"http://localhost:3000",
-		notice.WithSMTP(notification.SMTPConfig{
+		notification.WithSMTP(notification.SMTPConfig{
 			Host:     "localhost",
 			Port:     1025,
 			Username: "noreply@example.com",
@@ -230,7 +234,8 @@ func TestValidate2faPasscode(t *testing.T) {
 
 	// Create queries and service
 	queries := twofadb.New(dbPool)
-	service := NewTwoFaService(queries, WithNotificationManager(notificationManager))
+	repo := NewPostgresTwoFARepository(queries)
+	service := NewTwoFaService(repo, WithNotificationManager(notificationManager))
 
 	res, err := service.Validate2faPasscode(context.Background(), uuid.MustParse("cf9eca06-ecd3-4fd8-a291-a78d4f340ce8"), "email", "123456")
 
@@ -244,9 +249,9 @@ func TestValidate2faPasscode(t *testing.T) {
 }
 
 func TestFindEnabledTwoFAs(t *testing.T) {
-	notificationManager, err := notice.NewNotificationManager(
+	notificationManager, err := notification.NewNotificationManagerWithOptions(
 		"http://localhost:3000",
-		notice.WithSMTP(notification.SMTPConfig{
+		notification.WithSMTP(notification.SMTPConfig{
 			Host:     "localhost",
 			Port:     1025,
 			Username: "noreply@example.com",
@@ -263,7 +268,8 @@ func TestFindEnabledTwoFAs(t *testing.T) {
 
 	// Create queries and service
 	queries := twofadb.New(dbPool)
-	service := NewTwoFaService(queries, WithNotificationManager(notificationManager))
+	repo := NewPostgresTwoFARepository(queries)
+	service := NewTwoFaService(repo, WithNotificationManager(notificationManager))
 
 	res, err := service.FindEnabledTwoFAs(context.Background(), uuid.MustParse("98d38598-9e56-415a-aab3-7c8c72a2a1a0"))
 
@@ -274,9 +280,9 @@ func TestFindEnabledTwoFAs(t *testing.T) {
 }
 
 func TestFindTwoFAsByLoginId(t *testing.T) {
-	notificationManager, err := notice.NewNotificationManager(
+	notificationManager, err := notification.NewNotificationManagerWithOptions(
 		"http://localhost:3000",
-		notice.WithSMTP(notification.SMTPConfig{
+		notification.WithSMTP(notification.SMTPConfig{
 			Host:     "localhost",
 			Port:     1025,
 			Username: "noreply@example.com",
@@ -293,7 +299,8 @@ func TestFindTwoFAsByLoginId(t *testing.T) {
 
 	// Create queries and service
 	queries := twofadb.New(dbPool)
-	service := NewTwoFaService(queries, WithNotificationManager(notificationManager))
+	repo := NewPostgresTwoFARepository(queries)
+	service := NewTwoFaService(repo, WithNotificationManager(notificationManager))
 
 	res, err := service.FindTwoFAsByLoginId(context.Background(), uuid.MustParse("92d4479a-7692-4d9d-a4c1-77f203e4b621"))
 	require.NoError(t, err)
@@ -305,9 +312,10 @@ func TestFindTwoFAsByLoginId(t *testing.T) {
 func TestCreateTwoFactor(t *testing.T) {
 	setup()
 
-	// Create queries and service
+	// Create queries, repository and service
 	queries := twofadb.New(dbPool)
-	service := NewTwoFaService(queries)
+	repo := NewPostgresTwoFARepository(queries)
+	service := NewTwoFaService(repo)
 
 	err := service.CreateTwoFactor(context.Background(), uuid.MustParse("92d4479a-7692-4d9d-a4c1-77f203e4b621"), TWO_FACTOR_TYPE_EMAIL)
 
